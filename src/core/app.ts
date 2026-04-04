@@ -310,12 +310,12 @@ export class App {
       "- `/status` show current session and bridge state",
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
       "- `/session [list [-n <count>] [--all] [--project <path>]] [-h|--help]` inspect current session or browse recent sessions",
-      "- `/resume <session-id>` bind a previous session by ID",
+      "- `/resume [<session-id>|--last|-n <index>|--list] [-C <dir>] [-h|--help]` bind a previous session",
       "- `/stop` stop the current active run",
       "",
       "## Claude",
       "",
-      "- `/model [<name>]` show or set the Claude model for this conversation",
+      "- `/model [<name>|list] [-e|--effort <level>] [-h|--help]` show or set the model and effort level",
       "- `/permission [<mode>]` show or set the permission mode",
       "  - modes: `bypassPermissions` `acceptEdits` `auto` `default` `plan`",
       "",
@@ -350,6 +350,7 @@ export class App {
     const lines: string[] = [
       `**Claude Code**: ${version || "unknown"}`,
       `**Model**: ${binding?.model || this.config.claude.defaultModel || "(default)"}`,
+      `**Effort**: ${binding?.effort || "high (default)"}`,
       `**Permission mode**: ${binding?.permissionMode || this.config.claude.permissionMode}`,
       `**Project**: \`${project}\``,
     ];
@@ -427,30 +428,116 @@ export class App {
     return { text: "Failed to stop run.", severity: "warning" };
   }
 
-  private async handleModel(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
+  private modelHelpText(): string {
+    return [
+      "Show or change the model and effort level for this conversation.",
+      "",
+      "## Usage",
+      "",
+      "- `/model` — show current model and effort",
+      "- `/model <name>` — set model (e.g. `sonnet`, `opus`, `claude-sonnet-4-6`)",
+      "- `/model list` — list available models",
+      "- `/model --effort <level>` — set effort level",
+      "- `/model <name> --effort <level>` — set both at once",
+      "",
+      "## Options",
+      "",
+      "- `-e, --effort <level>` set effort: `low`, `medium`, `high` (default), `max`",
+      "- `-h, --help` show this help",
+    ].join("\n");
+  }
+
+  private static readonly KNOWN_MODELS: {
+    alias: string; model: string; reasoning: string; input: string;
+    personality: string; default?: boolean; hidden?: boolean; upgrade?: string; notes?: string;
+  }[] = [
+    { alias: "opus", model: "claude-opus-4-6", reasoning: "max", input: "200k", personality: "Thorough, precise", default: false, notes: "Most capable" },
+    { alias: "sonnet", model: "claude-sonnet-4-6", reasoning: "high", input: "200k", personality: "Balanced", default: true, notes: "Best value" },
+    { alias: "haiku", model: "claude-haiku-4-5-20251001", reasoning: "medium", input: "200k", personality: "Fast, concise", notes: "Fastest" },
+  ];
+
+  private async handleModel(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
     const binding = await this.store.get(key);
-    const modelName = cursor.remainingText();
 
-    if (!modelName) {
-      return `**Current model**: ${binding?.model || this.config.claude.defaultModel || "(default)"}`;
+    if (cursor.peek() === "-h" || cursor.peek() === "--help") {
+      return this.modelHelpText();
     }
 
+    if (cursor.peek() === "list") {
+      cursor.shift();
+      if (!cursor.isEmpty()) {
+        return this.renderCommandError("Model", `unexpected argument: ${cursor.peek()!}`, "/model list");
+      }
+      const currentModel = binding?.model || this.config.claude.defaultModel || "";
+      const header = "| # | Model | Reasoning | Input | Personality | Default | Upgrade | Notes |";
+      const sep    = "|---|-------|-----------|-------|-------------|---------|---------|-------|";
+      const rows = App.KNOWN_MODELS.map((m, i) => {
+        const isCurrent = currentModel === m.alias || currentModel === m.model;
+        const num = `${i + 1}`;
+        const name = isCurrent ? `\`${m.alias}\` \`current\`` : m.alias;
+        const def = m.default ? "✓" : "";
+        const upgrade = m.upgrade || "";
+        const notes = m.notes || "";
+        return `| ${num} | ${name} | ${m.reasoning} | ${m.input} | ${m.personality} | ${def} | ${upgrade} | ${notes} |`;
+      });
+      return [header, sep, ...rows].join("\n");
+    }
+
+    const VALID_EFFORTS = ["low", "medium", "high", "max"];
+    let modelName: string | undefined;
+    let effort: string | undefined;
+
+    while (!cursor.isEmpty()) {
+      const tok = cursor.peek()!;
+      if (tok === "-e" || tok === "--effort") {
+        cursor.shift();
+        const level = cursor.shift();
+        if (!level) {
+          return this.renderCommandError("Model", "missing effort level", "/model --effort <low|medium|high|max>");
+        }
+        if (!VALID_EFFORTS.includes(level)) {
+          return this.renderCommandError("Model", `invalid effort level: ${level}`, `valid: ${VALID_EFFORTS.join(", ")}`);
+        }
+        effort = level;
+      } else if (tok.startsWith("-")) {
+        return this.renderCommandError("Model", `unknown option: ${tok}`, "/model -h");
+      } else {
+        if (modelName) {
+          return this.renderCommandError("Model", `unexpected argument: ${tok}`, "/model [<name>] [-e|--effort <level>]");
+        }
+        modelName = cursor.shift()!;
+      }
+    }
+
+    // No args → show current
+    if (!modelName && !effort) {
+      const currentModel = binding?.model || this.config.claude.defaultModel || "(default)";
+      const currentEffort = binding?.effort || "high (default)";
+      return `**Model**: ${currentModel}\n**Effort**: ${currentEffort}`;
+    }
+
+    // Apply changes
     const now = new Date().toISOString();
+    const lines: string[] = [];
     if (binding) {
-      binding.model = modelName;
+      if (modelName) binding.model = modelName;
+      if (effort) binding.effort = effort;
       binding.updatedAt = now;
       await this.store.put(binding);
     } else {
       await this.store.put({
         conversationKey: key,
         project: this.config.project.defaultProject,
-        model: modelName,
+        ...(modelName ? { model: modelName } : {}),
+        ...(effort ? { effort } : {}),
         createdAt: now,
         updatedAt: now
       });
     }
-    return `Model set to: **${modelName}**`;
+    if (modelName) lines.push(`Model set to: **${modelName}**`);
+    if (effort) lines.push(`Effort set to: **${effort}**`);
+    return lines.join("\n");
   }
 
   private async handlePermission(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
@@ -775,21 +862,147 @@ export class App {
     ].join("\n");
   }
 
-  private async handleResume(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
+  private resumeHelpText(): string {
+    return [
+      "Resume a Claude session and bind it to this conversation.",
+      "",
+      "## Usage",
+      "",
+      "- `/resume <session-id>` — bind one specific session by ID",
+      "- `/resume --last` — bind the most recent session in the current scope",
+      "- `/resume -n <index>` — bind the Nth session from the current `/session list` ordering",
+      "- `/resume --list [--all] [--project <path>]` — show resumable sessions",
+      "- `/resume -h|--help` — show this help",
+      "",
+      "## Options",
+      "",
+      "### Select Session",
+      "",
+      "- `<session-id>` bind one specific session ID",
+      "- `--last` bind the most recent session in the current scope",
+      "- `-n <index>` bind the Nth session from the current `/session list` ordering",
+      "",
+      "### List Scope",
+      "",
+      "- `--list` show the current resumable session list",
+      "- `--all` expand browsing beyond the current project for `--list`",
+      "- `--project <path>` scope `--list` browsing to one project path",
+      "",
+      "### Project",
+      "",
+      "- `-C, --cd <dir>` switch the conversation project when binding the session",
+      "",
+      "### General",
+      "",
+      "- `-h, --help` show resume help",
+      "",
+      "## Examples",
+      "",
+      "- `/resume 41252e25-f28c-4351-9fcf-3b22a9b3c326`",
+      "- `/resume --last`",
+      "- `/resume -n 2`",
+      "- `/resume --list`",
+      "- `/resume --list --all`"
+    ].join("\n");
+  }
+
+  private async handleResume(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
-    const sessionId = cursor.remainingText();
-    if (!sessionId) {
-      return "Usage: `/resume <session-id>`";
+
+    if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.resumeHelpText();
+
+    const showList = cursor.takeFlag("--list");
+    const allProjects = cursor.takeFlag("--all");
+    const projectArg = cursor.takeOption("--project");
+    const indexArg = cursor.takeOption("-n");
+    const last = cursor.takeFlag("--last");
+    const cdArg = cursor.takeOption("-C", "--cd");
+
+    // --list: show sessions table (same as /session list but scoped)
+    if (showList) {
+      if (!cursor.isEmpty()) {
+        return this.renderCommandError("Resume", `unsupported argument \`${cursor.peek()}\``, "`/resume --list [--all] [--project <path>]`");
+      }
+      const binding = await this.store.get(key);
+      const currentProject = await this.effectiveProject(binding);
+      const projectDir = projectArg || (allProjects ? undefined : currentProject);
+      const [sessions, allBindings] = await Promise.all([
+        this.claude.listSessions(projectDir, 20),
+        this.store.list()
+      ]);
+      if (sessions.length === 0) return "No sessions.";
+      const currentSessionId = binding?.claudeSessionId;
+      const boundIds = new Set(allBindings.map((b) => b.claudeSessionId).filter(Boolean));
+      const lastMessages = await Promise.all(
+        sessions.map((s) => this.claude.getLastUserMessage(s.sessionId).catch(() => undefined))
+      );
+      const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      const header = "| # | Project | Updated | Session | Last message | Summary | Branch | Flags |";
+      const divider = "| --- | --- | --- | --- | --- | --- | --- | --- |";
+      const rows = sessions.map((s, i) => {
+        const project = s.cwd ? `\`${s.cwd}\`` : "-";
+        const updated = s.lastModified ? new Date(s.lastModified).toISOString().slice(0, 19).replace("T", " ") : "-";
+        const sessionId = `\`${s.sessionId}\``;
+        const lastMsg = lastMessages[i] ? escapeCell(lastMessages[i]!) : "-";
+        const summary = escapeCell(s.summary || s.firstPrompt || "(no preview)");
+        const branch = s.gitBranch ? `\`${s.gitBranch}\`` : "-";
+        const flags = [
+          s.sessionId === currentSessionId ? "`current`" : "",
+          boundIds.has(s.sessionId) && s.sessionId !== currentSessionId ? "bound" : "",
+          s.tag ? `\`${s.tag}\`` : "",
+          s.customTitle ? `_${s.customTitle}_` : ""
+        ].filter(Boolean).join(" ");
+        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${branch} | ${flags || "-"} |`;
+      });
+      return [header, divider, ...rows].join("\n");
     }
+
+    // Resolve target session ID
+    let sessionId: string | undefined;
+
+    if (indexArg !== undefined || last) {
+      const binding = await this.store.get(key);
+      const currentProject = await this.effectiveProject(binding);
+      const projectDir = projectArg || (allProjects ? undefined : currentProject);
+      const sessions = await this.claude.listSessions(projectDir, 20);
+      if (sessions.length === 0) {
+        return this.renderCommandError("Resume", "no sessions found in current scope", "`/resume --list [--all]`");
+      }
+      if (last) {
+        sessionId = sessions[0]?.sessionId;
+      } else {
+        const index = Number(indexArg);
+        if (!indexArg || !Number.isInteger(index) || index < 1) {
+          return this.renderCommandError("Resume", "invalid index — must be a positive integer", "`/resume -n <index>`");
+        }
+        const selected = sessions[index - 1];
+        if (!selected) {
+          return this.renderCommandError("Resume", `index ${index} out of range (1–${sessions.length})`, "`/resume --list`");
+        }
+        sessionId = selected.sessionId;
+      }
+    } else {
+      sessionId = cursor.remainingText() || undefined;
+    }
+
+    if (!sessionId) {
+      return this.renderCommandError("Resume", "no session specified", "`/resume [<session-id>|--last|-n <index>|--list] [-h|--help]`");
+    }
+
     const binding = await this.store.get(key);
     const now = new Date().toISOString();
 
-    // Try to inherit project from the session's recorded cwd
+    // Resolve project: -C/--cd arg > session cwd > current effective project
     const sessionInfo = await this.claude.getSessionInfo(sessionId).catch(() => undefined);
     const sessionCwd = sessionInfo?.cwd;
-    const resolvedProject = sessionCwd && this.isAllowedProject(sessionCwd)
-      ? sessionCwd
-      : await this.effectiveProject(binding);
+    let resolvedProject: string;
+    if (cdArg) {
+      resolvedProject = this.resolveProject(cdArg);
+    } else if (sessionCwd && this.isAllowedProject(sessionCwd)) {
+      resolvedProject = sessionCwd;
+    } else {
+      resolvedProject = await this.effectiveProject(binding);
+    }
 
     if (binding) {
       binding.claudeSessionId = sessionId;
@@ -797,14 +1010,9 @@ export class App {
       binding.updatedAt = now;
       await this.store.put(binding);
     } else {
-      await this.store.put({
-        conversationKey: key,
-        claudeSessionId: sessionId,
-        project: resolvedProject,
-        createdAt: now,
-        updatedAt: now
-      });
+      await this.store.put({ conversationKey: key, claudeSessionId: sessionId, project: resolvedProject, createdAt: now, updatedAt: now });
     }
+
     const lines = [`Resumed session: \`${sessionId}\``, `**Project**: \`${resolvedProject}\``];
     if (sessionCwd && sessionCwd !== resolvedProject) {
       lines.push(`_(session cwd \`${sessionCwd}\` outside allowed roots — kept existing project)_`);
@@ -898,6 +1106,7 @@ export class App {
     const turnOptions: ClaudeTurnOptions = {
       model: binding?.model || undefined,
       permissionMode: binding?.permissionMode || undefined,
+      effort: binding?.effort || undefined,
     };
 
     try {
@@ -974,9 +1183,10 @@ export class App {
   private titleForCommand(commandName: string | undefined, text: string): string {
     const maxLen = this.config.feishu.titleMaxLength;
     if (!commandName) {
-      const preview = text.replace(/\s+/g, " ").trim();
-      const truncated = preview.length > maxLen ? preview.slice(0, maxLen - 3) + "..." : preview;
-      return truncated || "Claude";
+      const preview = text.replace(/\s+/g, " ").trim() || "Claude";
+      const prefix = "Claude | \ud83e\udd16 ";
+      if (prefix.length >= maxLen) return "Claude";
+      return `${prefix}${preview.slice(0, maxLen - prefix.length)}`;
     }
     // Shell passthrough commands: show "cmd args..." truncated to maxLen
     if (SHELL_COMMAND_NAMES.has(commandName)) {
@@ -1083,15 +1293,21 @@ export class App {
   }
 
   private async sendStartupReadyNotification(label: string, logMessage: string): Promise<void> {
-    const version = await this.claude.getVersion();
-    const defaultProject = await this.resolveDefaultProject();
+    const startupChatId = this.config.feishu.startupNotifyChatId;
+    const startupKey = startupChatId ? `p2p:${startupChatId}` : undefined;
+    const [version, binding] = await Promise.all([
+      this.claude.getVersion(),
+      startupKey ? this.store.get(startupKey) : Promise.resolve(undefined)
+    ]);
+    const project = await this.effectiveProject(binding);
+    const footer = await this.buildFooter(startupKey || "", binding);
     const text = [
       `Claude Code: ${version || "unknown"}`,
       `Model: ${this.config.claude.defaultModel || "(default)"}`,
-      `Project: \`${defaultProject}\``
+      `Project: \`${project}\``
     ].join("\n");
     try {
-      await this.feishu?.sendStartupReady(text, undefined, label);
+      await this.feishu?.sendStartupReady(text, footer, label);
       console.log(logMessage);
     } catch (error) {
       console.warn("failed to send startup notification", error);

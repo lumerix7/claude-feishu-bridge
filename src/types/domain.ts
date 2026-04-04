@@ -7,6 +7,7 @@ export interface SessionBinding {
   project: string;
   model?: string;
   permissionMode?: string;
+  effort?: string;
   createdAt: string;
   updatedAt: string;
 }

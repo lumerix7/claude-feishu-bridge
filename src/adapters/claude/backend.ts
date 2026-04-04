@@ -29,6 +29,7 @@ export interface ClaudeTurnOptions {
   maxBudgetUsd?: number;
   systemPrompt?: string;
   appendSystemPrompt?: string;
+  effort?: string;
 }
 
 export interface ClaudeBackend {
