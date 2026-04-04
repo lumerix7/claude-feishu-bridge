@@ -321,7 +321,7 @@ export class App {
       "",
       "## Project",
       "",
-      "- `/project [list|bind <path>|unbind]` show the current project or manage project bindings",
+      "- `/project [list|bind [<path>|-n <index>|-m <path>]|unbind] [-h|--help]` show or manage the bound project",
       "- `/git [args...]` run `git` directly in the current bound project",
       "- `/pwd` show the current bound project directory",
       "- `/ls [args...]` `/cat <file>` `/head` `/tail` file inspection tools",
@@ -458,26 +458,134 @@ export class App {
     return `Permission mode set to: **${mode}**`;
   }
 
-  private async handleProject(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
+  private projectHelpText(): string {
+    return [
+      "Inspect the current bound project, browse known projects, or bind one.",
+      "",
+      "## Usage",
+      "",
+      "- `/project` — show the current bound project",
+      "- `/project list` — browse known projects",
+      "- `/project bind [<path>|-n <index>|-m|--mkdir <path>]` — bind a project",
+      "- `/project unbind` — remove the project binding for this conversation",
+      "- `/project -h|--help` — show this help",
+      "",
+      "## Options",
+      "",
+      "### List",
+      "",
+      "- `list` browse known projects (indexed for use with `bind -n`)",
+      "",
+      "### Bind",
+      "",
+      "- `bind <path>` bind a project path to this conversation",
+      "- `bind -n <index>` bind a project from the current `/project list` ordering",
+      "- `bind -m, --mkdir <path>` create the directory before binding",
+      "",
+      "### Unbind",
+      "",
+      "- `unbind` remove the project binding for this conversation",
+      "",
+      "### General",
+      "",
+      "- `-h, --help` show project help",
+      "",
+      "## Examples",
+      "",
+      "- `/project`",
+      "- `/project list`",
+      "- `/project bind /volumes/ws/my-project`",
+      "- `/project bind -n 2`",
+      "- `/project bind --mkdir /volumes/ws/new-project`",
+      "- `/project unbind`"
+    ].join("\n");
+  }
+
+  private async handleProject(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
     const sub = cursor.shift();
 
+    if (sub === "-h" || sub === "--help") return this.projectHelpText();
+
     if (sub === "list") {
-      const bindings = await this.store.list();
-      const projects = [...new Set(bindings.map((b) => b.project))];
-      if (projects.length === 0) {
-        return "No projects bound.";
+      if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.projectHelpText();
+      if (!cursor.isEmpty()) {
+        return this.renderCommandError("Project", `unsupported project list argument \`${cursor.peek()}\``, "`/project list`");
       }
-      return projects.map((p) => `- \`${p}\``).join("\n");
+      const [bindings, currentBinding] = await Promise.all([
+        this.store.list(),
+        this.store.get(key)
+      ]);
+      const currentProject = currentBinding?.project;
+
+      // Deduplicate by project path, keep most-recently-updated binding per project
+      const byProject = new Map<string, { updatedAt: string }>();
+      for (const b of bindings) {
+        if (!b.project) continue;
+        const existing = byProject.get(b.project);
+        if (!existing || b.updatedAt > existing.updatedAt) {
+          byProject.set(b.project, { updatedAt: b.updatedAt });
+        }
+      }
+
+      if (byProject.size === 0) return "No projects bound.";
+
+      const projects = await this.listProjects(currentProject);
+
+      const escapeCell = (s: string) => s.replace(/\|/g, "\\|");
+      const header = "| # | Name | Flags | Updated | Path |";
+      const divider = "| --- | --- | --- | --- | --- |";
+      const rows = projects.map((p, i) => {
+        const meta = byProject.get(p);
+        const name = escapeCell(path.basename(p));
+        const flags = [
+          p === currentProject ? "current" : "bound",
+          this.isAllowedProject(p) ? "trusted" : ""
+        ].filter(Boolean).join(", ");
+        const updated = meta?.updatedAt ? meta.updatedAt.slice(0, 19).replace("T", " ") : "-";
+        return `| ${i + 1} | ${name} | ${flags} | ${updated} | \`${escapeCell(p)}\` |`;
+      });
+
+      return [header, divider, ...rows].join("\n");
     }
 
     if (sub === "bind") {
-      const dirArg = cursor.remainingText();
-      if (!dirArg) return "Usage: `/project bind <path>`";
-      const project = this.resolveProject(dirArg);
-      if (!this.isAllowedProject(project)) {
-        return `Project path not allowed: ${project}`;
+      if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.projectHelpText();
+      const mkdir = cursor.takeFlag("-m") || cursor.takeFlag("--mkdir");
+      const indexArg = cursor.takeOption("-n");
+
+      let project: string;
+      if (indexArg !== undefined) {
+        if (!cursor.isEmpty()) {
+          return this.renderCommandError("Project", `unsupported bind argument \`${cursor.peek()}\``, "`/project bind -n <index>`");
+        }
+        const index = Number(indexArg);
+        if (!indexArg || !Number.isInteger(index) || index < 1) {
+          return this.renderCommandError("Project", "invalid index — must be a positive integer", "`/project bind -n <index>`");
+        }
+        const currentBind = await this.store.get(key);
+        const projects = await this.listProjects(currentBind?.project);
+        const selected = projects[index - 1];
+        if (!selected) {
+          return this.renderCommandError("Project", `index ${index} out of range (1–${projects.length})`, "`/project list`");
+        }
+        project = selected;
+      } else {
+        const dirArg = cursor.remainingText();
+        if (!dirArg) {
+          return this.renderCommandError("Project", "missing path", "`/project bind <path>`");
+        }
+        project = this.resolveProject(dirArg);
       }
+
+      if (!this.isAllowedProject(project)) {
+        return this.renderCommandError("Project", `path not in allowed roots: \`${project}\``, "`/project bind <path>`");
+      }
+
+      if (mkdir) {
+        await execFileAsync("mkdir", ["-p", project]);
+      }
+
       const binding = await this.store.get(key);
       const now = new Date().toISOString();
       if (binding) {
@@ -485,17 +593,16 @@ export class App {
         binding.updatedAt = now;
         await this.store.put(binding);
       } else {
-        await this.store.put({
-          conversationKey: key,
-          project,
-          createdAt: now,
-          updatedAt: now
-        });
+        await this.store.put({ conversationKey: key, project, createdAt: now, updatedAt: now });
       }
       return `Project bound: \`${project}\``;
     }
 
     if (sub === "unbind") {
+      if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.projectHelpText();
+      if (!cursor.isEmpty()) {
+        return this.renderCommandError("Project", `unsupported unbind argument \`${cursor.peek()}\``, "`/project unbind`");
+      }
       const binding = await this.store.get(key);
       if (!binding) return "No binding to remove.";
       binding.project = this.config.project.defaultProject;
@@ -503,6 +610,10 @@ export class App {
       binding.updatedAt = new Date().toISOString();
       await this.store.put(binding);
       return `Unbound. Reset to default project: \`${this.config.project.defaultProject}\``;
+    }
+
+    if (sub !== undefined) {
+      return this.renderCommandError("Project", `unknown subcommand \`${sub}\``, "`/project [list|bind|unbind] [-h|--help]`");
     }
 
     // Default: show current
@@ -795,6 +906,21 @@ export class App {
     } finally {
       this.activeRuns.delete(key);
     }
+  }
+
+  private async listProjects(currentProject?: string): Promise<string[]> {
+    const bindings = await this.store.list();
+    const byProject = new Map<string, string>(); // project → updatedAt
+    for (const b of bindings) {
+      if (!b.project) continue;
+      const existing = byProject.get(b.project);
+      if (!existing || b.updatedAt > existing) byProject.set(b.project, b.updatedAt);
+    }
+    return [...byProject.keys()].sort((a, b) => {
+      if (a === currentProject) return -1;
+      if (b === currentProject) return 1;
+      return a.localeCompare(b);
+    });
   }
 
   // ---- Helpers ----
