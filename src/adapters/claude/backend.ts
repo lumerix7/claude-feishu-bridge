@@ -1,7 +1,7 @@
-import type { SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import { IncomingMessage } from "../../types/domain.js";
 
-export type { SDKSessionInfo };
+export type { SDKSessionInfo, SessionMessage };
 
 export interface ClaudeTurnResult {
   runId: string;
@@ -43,5 +43,6 @@ export interface ClaudeBackend {
   stop(runId: string): Promise<boolean>;
   listSessions(dir?: string, limit?: number): Promise<SDKSessionInfo[]>;
   getSessionInfo(sessionId: string): Promise<SDKSessionInfo | undefined>;
+  getLastUserMessage(sessionId: string): Promise<string | undefined>;
   getVersion(): Promise<string | undefined>;
 }

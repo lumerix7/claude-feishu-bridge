@@ -286,6 +286,20 @@ export class App {
     return this.handleClaudeTurn(message, onUpdate, onStatus);
   }
 
+  // ---- Helpers ----
+
+  private renderCommandError(title: string, error: string, usage?: string): AppResponse {
+    return {
+      severity: "warning",
+      text: [
+        `# ${title}`,
+        "",
+        `- **Error**: ${error}`,
+        ...(usage ? [`- **Usage**: ${usage}`] : [])
+      ].join("\n")
+    };
+  }
+
   // ---- Command handlers ----
 
   private handleHelp(): string {
@@ -295,7 +309,7 @@ export class App {
       "- `/help` show commands",
       "- `/status` show current session and bridge state",
       "- `/new [-C|--cd <dir>]` create and bind a fresh Claude session",
-      "- `/session [list]` show the current session or list recent sessions",
+      "- `/session [list [-n <count>] [--all] [--project <path>]] [-h|--help]` inspect current session or browse recent sessions",
       "- `/resume <session-id>` bind a previous session by ID",
       "- `/stop` stop the current active run",
       "",
@@ -496,12 +510,65 @@ export class App {
     return `**Project**: \`${await this.effectiveProject(binding)}\``;
   }
 
-  private async handleSession(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
+  private sessionHelpText(): string {
+    return [
+      "Inspect the current bound session or browse recent Claude Code sessions.",
+      "",
+      "## Usage",
+      "",
+      "- `/session` — show the current bound session",
+      "- `/session list [-n <count>] [--all] [--project <path>]` — list recent sessions",
+      "- `/session -h|--help` — show this help",
+      "",
+      "## List options",
+      "",
+      "- `-n <count>` limit the number of sessions shown (default: 20)",
+      "- `--all` include sessions from all projects (default: current project only)",
+      "- `--project <path>` filter to a specific project path",
+      "",
+      "## Columns",
+      "",
+      "- **Project** — working directory of the session",
+      "- **Updated** — last modified time",
+      "- **Session** — full session UUID (copy to use with `/resume`)",
+      "- **Last message** — last user message sent in the session",
+      "- **Summary** — Claude-generated session summary or first prompt",
+      "- **Branch** — git branch at end of session",
+      "- **Flags** — `current` (bound to this chat), `bound` (bound elsewhere), tag, custom title",
+      "",
+      "## Examples",
+      "",
+      "- `/session`",
+      "- `/session list`",
+      "- `/session list -n 5`",
+      "- `/session list --all`",
+      "- `/resume <session-id>`"
+    ].join("\n");
+  }
+
+  private async handleSession(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
     const sub = cursor.shift();
+    if (sub === "-h" || sub === "--help") return this.sessionHelpText();
     if (sub === "list") {
+      if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.sessionHelpText();
+      const allProjects = cursor.takeFlag("--all");
+      const projectArg = cursor.takeOption("--project");
+      const countRaw = cursor.takeOption("-n");
+      const limit = countRaw ? Math.max(1, Math.min(100, Number(countRaw) || 20)) : 20;
+
+      if (!cursor.isEmpty()) {
+        const leftover = cursor.peek()!;
+        return leftover.startsWith("/") || (!leftover.startsWith("-") && leftover.includes("/"))
+          ? this.renderCommandError("Session", "use `--project <path>` to filter sessions by project path", "`/session list [--project <path>] [-n <count>] [--all]`")
+          : this.renderCommandError("Session", `unsupported session list argument \`${leftover}\``, "`/session list [-n <count>] [--all] [--project <path>]`");
+      }
+
+      const binding = await this.store.get(key);
+      const projectDir = projectArg || (allProjects ? undefined : (binding?.project || undefined));
+
       const [sessions, allBindings] = await Promise.all([
-        this.claude.listSessions(undefined, 20),
+        this.claude.listSessions(projectDir, limit),
         this.store.list()
       ]);
       if (sessions.length === 0) return "No sessions.";
@@ -509,15 +576,22 @@ export class App {
       const currentSessionId = (await this.store.get(key))?.claudeSessionId;
       const boundIds = new Set(allBindings.map((b) => b.claudeSessionId).filter(Boolean));
 
-      const header = "| # | Project | Updated | Session | Summary | Branch | Flags |";
-      const divider = "| --- | --- | --- | --- | --- | --- | --- |";
+      // Fetch last user message for each session in parallel
+      const lastMessages = await Promise.all(
+        sessions.map((s) => this.claude.getLastUserMessage(s.sessionId).catch(() => undefined))
+      );
+
+      const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      const header = "| # | Project | Updated | Session | Last message | Summary | Branch | Flags |";
+      const divider = "| --- | --- | --- | --- | --- | --- | --- | --- |";
       const rows = sessions.map((s, i) => {
         const project = s.cwd ? `\`${s.cwd}\`` : "-";
         const updated = s.lastModified
           ? new Date(s.lastModified).toISOString().slice(0, 19).replace("T", " ")
           : "-";
         const sessionId = `\`${s.sessionId}\``;
-        const summary = (s.firstPrompt || s.summary || "(no preview)").replace(/\|/g, "\\|").replace(/\n/g, " ");
+        const lastMsg = lastMessages[i] ? escapeCell(lastMessages[i]!) : "-";
+        const summary = escapeCell(s.summary || s.firstPrompt || "(no preview)");
         const branch = s.gitBranch ? `\`${s.gitBranch}\`` : "-";
         const flags = [
           s.sessionId === currentSessionId ? "**current**" : "",
@@ -525,7 +599,7 @@ export class App {
           s.tag ? `\`${s.tag}\`` : "",
           s.customTitle ? `_${s.customTitle}_` : ""
         ].filter(Boolean).join(" ");
-        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${summary} | ${branch} | ${flags || "-"} |`;
+        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${branch} | ${flags || "-"} |`;
       });
 
       return [header, divider, ...rows].join("\n");

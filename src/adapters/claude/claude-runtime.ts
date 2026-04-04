@@ -5,6 +5,7 @@ import {
   query as sdkQuery,
   listSessions as sdkListSessions,
   getSessionInfo as sdkGetSessionInfo,
+  getSessionMessages as sdkGetSessionMessages,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Query,
@@ -323,6 +324,27 @@ export class SdkClaudeBackend implements ClaudeBackend {
 
   async getSessionInfo(sessionId: string): Promise<SDKSessionInfo | undefined> {
     return sdkGetSessionInfo(sessionId);
+  }
+
+  async getLastUserMessage(sessionId: string): Promise<string | undefined> {
+    try {
+      const messages = await sdkGetSessionMessages(sessionId);
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.type !== "user") continue;
+        const msg = m.message as { content?: unknown };
+        if (typeof msg.content === "string") return msg.content;
+        if (Array.isArray(msg.content)) {
+          const text = msg.content
+            .filter((b: unknown) => (b as { type?: string }).type === "text")
+            .map((b: unknown) => (b as { text?: string }).text || "")
+            .join("")
+            .trim();
+          if (text) return text;
+        }
+      }
+    } catch {}
+    return undefined;
   }
 
   async getVersion(): Promise<string | undefined> {
