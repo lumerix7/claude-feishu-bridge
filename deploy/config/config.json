@@ -1,0 +1,43 @@
+{
+  "feishu": {
+    "wsAutoReconnect": true,
+    "wsLoggerLevel": "debug",
+    "wsAgent": {
+      "keepAliveMsecs": 90000,
+      "maxSockets": 100,
+      "maxFreeSockets": 1
+    },
+    "wsConnectWarnAfterMs": 30000,
+    "reconnectReadyDebounceMs": 60000,
+    "titleMaxLength": 120,
+    "sendRetry": {
+      "maxAttempts": 5,
+      "baseDelayMs": 1000,
+      "multiplier": 2,
+      "maxDelayMs": 10000
+    }
+  },
+  "claude": {
+    "claudeBin": "/opt/node/bin/claude",
+    "permissionMode": "bypassPermissions",
+    "maxBudgetUsd": 10,
+    "outputSoftLimit": 100000,
+    "runTimeoutMs": 600000,
+    "statusIntervalMs": 60000,
+    "streamUpdateIntervalMs": 120,
+    "inlineBlocks": "on"
+  },
+  "project": {
+    "allowedRoots": [
+      "$HOME"
+    ],
+    "defaultPath": "$HOME",
+    "listMaxCount": 100
+  },
+  "commands": {
+    "map": {}
+  },
+  "paths": {
+    "storePath": "$HOME/.local/share/claude-feishu-bridge/bindings.json"
+  }
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=Claude Feishu Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@HOME@
+EnvironmentFile=@HOME@/.config/claude-feishu-bridge/bridge.env
+Environment=HOME=@HOME@
+Environment=TMPDIR=/tmp
+Environment=PATH=@PATH@
+ExecStart=@BIN_PATH@
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
