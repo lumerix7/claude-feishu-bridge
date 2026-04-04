@@ -288,7 +288,7 @@ export class FeishuGateway {
       }
 
       if (active.hasRawMarkdownElement) {
-        const nextRawMarkdown = message.includeRawMarkdown !== false ? wrapRawMarkdown(rendered) : "";
+        const nextRawMarkdown = message.includeRawMarkdown === true ? wrapRawMarkdown(rendered) : "";
         if (nextRawMarkdown !== active.rawMarkdownContent) {
           await this.withFeishuRetry(async () =>
             this.client.cardkit.v1.cardElement.update({
@@ -422,7 +422,7 @@ export class FeishuGateway {
               message.template,
               footer,
               summary,
-              message.includeRawMarkdown !== false
+              message.includeRawMarkdown === true
             )
           )
         }
@@ -458,7 +458,7 @@ export class FeishuGateway {
       sequence: 1,
       lastText: "",
       chatId: message.chatId,
-      hasRawMarkdownElement: message.includeRawMarkdown !== false,
+      hasRawMarkdownElement: message.includeRawMarkdown === true,
       rawMarkdownContent: ""
     };
   }

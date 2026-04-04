@@ -308,7 +308,7 @@ export class App {
       "",
       "- `/help` show commands",
       "- `/status` show current session and bridge state",
-      "- `/new [-C|--cd <dir>]` create and bind a fresh Claude session",
+      "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
       "- `/session [list [-n <count>] [--all] [--project <path>]] [-h|--help]` inspect current session or browse recent sessions",
       "- `/resume <session-id>` bind a previous session by ID",
       "- `/stop` stop the current active run",
@@ -365,15 +365,41 @@ export class App {
     return lines.join("\n");
   }
 
+  private newHelpText(): string {
+    return [
+      "Create and bind a fresh Claude session for the current bound project.",
+      "",
+      "## Usage",
+      "",
+      "- `/new` — create a new session for the current project",
+      "- `/new -C|--cd <dir>` — switch project then create a new session",
+      "- `/new -h|--help` — show this help",
+      "",
+      "## Options",
+      "",
+      "- `-C, --cd <dir>` switch the conversation project before creating the new session",
+      "- `-h, --help` show new-session help"
+    ].join("\n");
+  }
+
   private async handleNew(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
+
+    if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.newHelpText();
+
     const dirArg = cursor.takeOption("-C", "--cd");
+
+    if (!cursor.isEmpty()) {
+      return this.renderCommandError("New Session", `unsupported argument \`${cursor.peek()}\``, "`/new [-C|--cd <dir>] [-h|--help]`");
+    }
+
+    const binding = await this.store.get(key);
     const project = dirArg
       ? this.resolveProject(dirArg)
-      : (await this.store.get(key))?.project || this.config.project.defaultProject;
+      : await this.effectiveProject(binding);
 
     if (!this.isAllowedProject(project)) {
-      return { text: `Project path not allowed: ${project}`, severity: "warning" };
+      return this.renderCommandError("New Session", `path not in allowed roots: \`${project}\``, "`/new [-C|--cd <dir>]`");
     }
 
     const now = new Date().toISOString();
@@ -512,25 +538,39 @@ export class App {
       if (!cursor.isEmpty()) {
         return this.renderCommandError("Project", `unsupported project list argument \`${cursor.peek()}\``, "`/project list`");
       }
-      const [bindings, currentBinding] = await Promise.all([
+      const [bindings, currentBinding, sessions] = await Promise.all([
         this.store.list(),
-        this.store.get(key)
+        this.store.get(key),
+        this.claude.listSessions(undefined, 50).catch(() => [])
       ]);
-      const currentProject = currentBinding?.project;
+      const currentProject = await this.effectiveProject(currentBinding);
 
-      // Deduplicate by project path, keep most-recently-updated binding per project
-      const byProject = new Map<string, { updatedAt: string }>();
+      // Project metadata map: path → { updatedAt, source }
+      // "bound" = has explicit store binding; "session" = seen in Claude session only
+      type ProjectMeta = { updatedAt?: string; source: "bound" | "session" };
+      const byProject = new Map<string, ProjectMeta>();
+
+      // Populate from store bindings (authoritative, with timestamp)
       for (const b of bindings) {
-        if (!b.project) continue;
+        if (!b.project || this.isStaleProject(b.project)) continue;
         const existing = byProject.get(b.project);
-        if (!existing || b.updatedAt > existing.updatedAt) {
-          byProject.set(b.project, { updatedAt: b.updatedAt });
+        if (!existing || (b.updatedAt > (existing.updatedAt || ""))) {
+          byProject.set(b.project, { updatedAt: b.updatedAt, source: "bound" });
         }
       }
 
-      if (byProject.size === 0) return "No projects bound.";
+      // Enrich from Claude sessions (for projects with no explicit binding)
+      for (const s of sessions) {
+        if (!s.cwd || !this.isAllowedProject(s.cwd)) continue;
+        if (!byProject.has(s.cwd)) {
+          const sessionUpdatedAt = s.lastModified ? new Date(s.lastModified).toISOString() : undefined;
+          byProject.set(s.cwd, { updatedAt: sessionUpdatedAt, source: "session" });
+        }
+      }
 
-      const projects = await this.listProjects(currentProject);
+      if (byProject.size === 0) return "No projects found.";
+
+      const projects = await this.listProjects(currentProject, byProject.keys());
 
       const escapeCell = (s: string) => s.replace(/\|/g, "\\|");
       const header = "| # | Name | Flags | Updated | Path |";
@@ -539,8 +579,9 @@ export class App {
         const meta = byProject.get(p);
         const name = escapeCell(path.basename(p));
         const flags = [
-          p === currentProject ? "current" : "bound",
-          this.isAllowedProject(p) ? "trusted" : ""
+          p === currentProject ? "`current`" : meta?.source === "bound" ? "bound" : "",
+          this.isAllowedProject(p) ? "trusted" : "",
+          meta?.source === "session" ? "session" : ""
         ].filter(Boolean).join(", ");
         const updated = meta?.updatedAt ? meta.updatedAt.slice(0, 19).replace("T", " ") : "-";
         return `| ${i + 1} | ${name} | ${flags} | ${updated} | \`${escapeCell(p)}\` |`;
@@ -563,8 +604,13 @@ export class App {
         if (!indexArg || !Number.isInteger(index) || index < 1) {
           return this.renderCommandError("Project", "invalid index — must be a positive integer", "`/project bind -n <index>`");
         }
-        const currentBind = await this.store.get(key);
-        const projects = await this.listProjects(currentBind?.project);
+        const [currentBind, sessions] = await Promise.all([
+          this.store.get(key),
+          this.claude.listSessions(undefined, 50).catch(() => [])
+        ]);
+        const sessionPaths = sessions.map((s) => s.cwd).filter((c): c is string => !!c && this.isAllowedProject(c));
+        const currentBind2 = currentBind;
+        const projects = await this.listProjects(await this.effectiveProject(currentBind2), sessionPaths);
         const selected = projects[index - 1];
         if (!selected) {
           return this.renderCommandError("Project", `index ${index} out of range (1–${projects.length})`, "`/project list`");
@@ -908,17 +954,17 @@ export class App {
     }
   }
 
-  private async listProjects(currentProject?: string): Promise<string[]> {
+  private async listProjects(currentProject?: string, knownPaths?: Iterable<string>): Promise<string[]> {
+    const all = new Set<string>(knownPaths);
     const bindings = await this.store.list();
-    const byProject = new Map<string, string>(); // project → updatedAt
     for (const b of bindings) {
-      if (!b.project) continue;
-      const existing = byProject.get(b.project);
-      if (!existing || b.updatedAt > existing) byProject.set(b.project, b.updatedAt);
+      if (b.project && !this.isStaleProject(b.project)) all.add(b.project);
     }
-    return [...byProject.keys()].sort((a, b) => {
+    return [...all].sort((a, b) => {
       if (a === currentProject) return -1;
       if (b === currentProject) return 1;
+      const byName = path.basename(a).localeCompare(path.basename(b));
+      if (byName !== 0) return byName;
       return a.localeCompare(b);
     });
   }
