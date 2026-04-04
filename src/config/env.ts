@@ -41,6 +41,7 @@ export interface AppConfig {
   claude: {
     claudeBin: string;
     defaultModel: string;
+    defaultEffortLevel: string;
     permissionMode: string;
     maxBudgetUsd: number;
     outputSoftLimit: number;
@@ -84,6 +85,7 @@ interface JsonConfigShape {
   claude?: {
     claudeBin?: unknown;
     defaultModel?: unknown;
+    defaultEffortLevel?: unknown;
     permissionMode?: unknown;
     maxBudgetUsd?: unknown;
     outputSoftLimit?: unknown;
@@ -152,6 +154,7 @@ export function loadConfig(): AppConfig {
     claude: {
       claudeBin: readTextSetting("CLAUDE_BIN", "claude", jsonConfig, ["claude", "claudeBin"]),
       defaultModel: readTextSetting("CLAUDE_DEFAULT_MODEL", "", jsonConfig, ["claude", "defaultModel"]),
+      defaultEffortLevel: readTextSetting("CLAUDE_DEFAULT_EFFORT_LEVEL", "", jsonConfig, ["claude", "defaultEffortLevel"]),
       permissionMode: readTextSetting("CLAUDE_PERMISSION_MODE", "bypassPermissions", jsonConfig, ["claude", "permissionMode"]),
       maxBudgetUsd: readNumberSetting("CLAUDE_MAX_BUDGET_USD", 5, jsonConfig, ["claude", "maxBudgetUsd"], { min: 0 }),
       outputSoftLimit: readIntegerSetting("CLAUDE_OUTPUT_SOFT_LIMIT", 100000, jsonConfig, ["claude", "outputSoftLimit"], { min: 1 }),

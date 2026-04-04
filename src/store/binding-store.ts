@@ -49,7 +49,6 @@ export class BindingStore {
             conversationKey: item.conversationKey,
             claudeSessionId: item.claudeSessionId,
             project: item.project,
-            model: item.model,
             permissionMode: item.permissionMode,
             createdAt: item.createdAt || new Date(0).toISOString(),
             updatedAt: item.updatedAt || item.createdAt || new Date(0).toISOString()

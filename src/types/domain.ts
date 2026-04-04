@@ -5,9 +5,7 @@ export interface SessionBinding {
   conversationKey: FeishuConversationKey;
   claudeSessionId?: ClaudeSessionId;
   project: string;
-  model?: string;
   permissionMode?: string;
-  effort?: string;
   createdAt: string;
   updatedAt: string;
 }

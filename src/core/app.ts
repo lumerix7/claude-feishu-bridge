@@ -1,6 +1,7 @@
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
 import { ClaudeBackend, ClaudeTurnOptions } from "../adapters/claude/backend.js";
 import { createClaudeBackend } from "../adapters/claude/claude-runtime.js";
 import { FeishuGateway } from "../adapters/feishu/feishu-gateway.js";
@@ -70,6 +71,8 @@ export class App {
   private readonly claude: ClaudeBackend;
   private feishu?: FeishuGateway;
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly modelOverrides = new Map<string, { model?: string; effort?: string }>();
+  private claudeSettingsCache: { model?: string; effortLevel?: string } | null | undefined = undefined;
 
   constructor(private readonly config: AppConfig) {
     this.store = new BindingStore(path.resolve(this.config.storePath));
@@ -116,7 +119,7 @@ export class App {
                   chatId: message.chatId,
                   title: messageTitle,
                   template: messageTemplate,
-                  footer: await this.footerForMessage(commandName, msgKey, latestBinding),
+                  footer: await this.buildFooter(msgKey, latestBinding),
                   text: update,
                   replyToMessageId: message.messageId,
                   threadId: message.threadId,
@@ -137,7 +140,7 @@ export class App {
                 chatId: message.chatId,
                 title: messageTitle,
                 template: messageTemplate,
-                footer: await this.footerForClaudeReply(msgKey, latestBinding),
+                footer: await this.buildFooter(msgKey, latestBinding),
                 text: snapshot,
                 replyToMessageId: message.messageId,
                 threadId: message.threadId,
@@ -189,9 +192,7 @@ export class App {
 
           if ((formattedText && formattedText !== lastUpdateText) || !streamed || shouldFinalizeLiveStream) {
             const latestBinding = (await this.store.get(conversationKeyFor(message))) || currentBinding;
-            const finalFooter = commandName
-              ? await this.footerForMessage(commandName, msgKey, latestBinding)
-              : await this.footerForClaudeReply(msgKey, latestBinding);
+            const finalFooter = await this.buildFooter(msgKey, latestBinding);
             const finalTemplate = responseSeverity === "error" ? "red"
               : responseSeverity === "warning" ? "yellow"
               : messageTemplate;
@@ -316,8 +317,8 @@ export class App {
       "## Claude",
       "",
       "- `/model [<name>|list] [-e|--effort <level>] [-h|--help]` show or set the model and effort level",
-      "- `/permission [<mode>]` show or set the permission mode",
-      "  - modes: `bypassPermissions` `acceptEdits` `auto` `default` `plan`",
+      "- `/permission [<mode>] [-h|--help]` show or set the permission mode",
+      "  - modes: `bypassPermissions` `acceptEdits` `auto` `dontAsk` `plan` `default`",
       "",
       "## Project",
       "",
@@ -344,13 +345,16 @@ export class App {
     const binding = await this.store.get(key);
     const activeRun = this.activeRuns.get(key);
 
-    const version = await this.claude.getVersion();
-    const project = await this.effectiveProject(binding);
+    const [version, project, modelOpts] = await Promise.all([
+      this.claude.getVersion(),
+      this.effectiveProject(binding),
+      this.resolveModelOptions(key),
+    ]);
 
     const lines: string[] = [
       `**Claude Code**: ${version || "unknown"}`,
-      `**Model**: ${binding?.model || this.config.claude.defaultModel || "(default)"}`,
-      `**Effort**: ${binding?.effort || "high (default)"}`,
+      `**Model**: ${modelOpts.model || "(default)"}`,
+      `**Effort**: ${modelOpts.effort || "(default)"}`,
       `**Permission mode**: ${binding?.permissionMode || this.config.claude.permissionMode}`,
       `**Project**: \`${project}\``,
     ];
@@ -469,7 +473,7 @@ export class App {
       if (!cursor.isEmpty()) {
         return this.renderCommandError("Model", `unexpected argument: ${cursor.peek()!}`, "/model list");
       }
-      const currentModel = binding?.model || this.config.claude.defaultModel || "";
+      const { model: currentModel } = await this.resolveModelOptions(key);
       const header = "| # | Model | Reasoning | Input | Personality | Default | Upgrade | Notes |";
       const sep    = "|---|-------|-----------|-------|-------------|---------|---------|-------|";
       const rows = App.KNOWN_MODELS.map((m, i) => {
@@ -510,37 +514,55 @@ export class App {
       }
     }
 
-    // No args → show current
+    // No args → show current resolved values
     if (!modelName && !effort) {
-      const currentModel = binding?.model || this.config.claude.defaultModel || "(default)";
-      const currentEffort = binding?.effort || "high (default)";
-      return `**Model**: ${currentModel}\n**Effort**: ${currentEffort}`;
+      const opts = await this.resolveModelOptions(key);
+      return `**Model**: ${opts.model || "(default)"}\n**Effort**: ${opts.effort || "(default)"}`;
     }
 
-    // Apply changes
-    const now = new Date().toISOString();
+    // Apply changes — kept in memory only, not persisted to bindings store
     const lines: string[] = [];
-    if (binding) {
-      if (modelName) binding.model = modelName;
-      if (effort) binding.effort = effort;
-      binding.updatedAt = now;
-      await this.store.put(binding);
-    } else {
-      await this.store.put({
-        conversationKey: key,
-        project: this.config.project.defaultProject,
-        ...(modelName ? { model: modelName } : {}),
-        ...(effort ? { effort } : {}),
-        createdAt: now,
-        updatedAt: now
-      });
-    }
+    const existing = this.modelOverrides.get(key) || {};
+    this.modelOverrides.set(key, {
+      ...existing,
+      ...(modelName ? { model: modelName } : {}),
+      ...(effort ? { effort } : {}),
+    });
     if (modelName) lines.push(`Model set to: **${modelName}**`);
     if (effort) lines.push(`Effort set to: **${effort}**`);
     return lines.join("\n");
   }
 
-  private async handlePermission(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
+  private permissionHelpText(): string {
+    return [
+      "Show or set the permission mode for this conversation.",
+      "",
+      "## Usage",
+      "",
+      "- `/permission` — show current permission mode",
+      "- `/permission <mode>` — set permission mode",
+      "- `/permission -h|--help` — show this help",
+      "",
+      "## Options",
+      "",
+      "- `-h, --help` show this help",
+      "",
+      "## Modes",
+      "",
+      "- `bypassPermissions` skip all permission checks (sandboxed environments only)",
+      "- `acceptEdits` auto-accept file edits",
+      "- `auto` auto-approve where safe",
+      "- `dontAsk` never prompt for permission",
+      "- `plan` read-only planning mode",
+      "- `default` restore Claude's default permission behaviour",
+    ].join("\n");
+  }
+
+  private async handlePermission(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
+    if (cursor.peek() === "-h" || cursor.peek() === "--help") {
+      return this.permissionHelpText();
+    }
+
     const key = conversationKeyFor(message);
     const binding = await this.store.get(key);
     const mode = cursor.remainingText();
@@ -551,7 +573,7 @@ export class App {
 
     const validModes = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"];
     if (!validModes.includes(mode)) {
-      return `Invalid permission mode. Valid: ${validModes.join(", ")}`;
+      return this.renderCommandError("Permission", `invalid mode: ${mode}`, `valid: ${validModes.join(", ")}`);
     }
 
     const now = new Date().toISOString();
@@ -1103,10 +1125,11 @@ export class App {
       return { text: `Project path not allowed: ${project}`, severity: "error" };
     }
 
+    const { model: resolvedModel, effort: resolvedEffort } = await this.resolveModelOptions(key);
     const turnOptions: ClaudeTurnOptions = {
-      model: binding?.model || undefined,
+      model: resolvedModel,
       permissionMode: binding?.permissionMode || undefined,
-      effort: binding?.effort || undefined,
+      effort: resolvedEffort,
     };
 
     try {
@@ -1226,26 +1249,43 @@ export class App {
     return "wathet";
   }
 
-  private async footerForMessage(commandName: string | undefined, key: string, binding: SessionBinding | undefined): Promise<string> {
-    if (!commandName) return this.footerForClaudeReply(key, binding);
-    return this.buildFooter(key, binding);
+  private async readClaudeSettings(): Promise<{ model?: string; effortLevel?: string }> {
+    if (this.claudeSettingsCache !== undefined) return this.claudeSettingsCache ?? {};
+    try {
+      const home = process.env["HOME"] || "";
+      const settingsPath = path.join(home, ".claude", "settings.json");
+      const raw = await readFile(settingsPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      this.claudeSettingsCache = {
+        model: typeof parsed["model"] === "string" ? parsed["model"] : undefined,
+        effortLevel: typeof parsed["effortLevel"] === "string" ? parsed["effortLevel"] : undefined,
+      };
+    } catch {
+      this.claudeSettingsCache = null;
+    }
+    return this.claudeSettingsCache ?? {};
   }
 
-  private async footerForClaudeReply(key: string, binding: SessionBinding | undefined): Promise<string> {
-    const ts = formatIsoTimestamp(new Date());
-    const model = binding?.model || this.config.claude.defaultModel;
-    const project = await this.effectiveProject(binding);
-    const sessionId = binding?.claudeSessionId;
-    const summary = [model, `\`${project}\``, sessionId]
-      .filter(Boolean)
-      .join(" · ");
-    return summary ? `${ts}  |  ${summary}` : ts;
+  // Resolve effective model and effort for a conversation.
+  // Priority: in-memory Feishu override → ~/.claude/settings.json → bridge config default
+  private async resolveModelOptions(key: string): Promise<{ model?: string; effort?: string }> {
+    const override = this.modelOverrides.get(key);
+    const cs = await this.readClaudeSettings();
+    return {
+      model: override?.model || cs.model || this.config.claude.defaultModel || undefined,
+      effort: override?.effort || cs.effortLevel || this.config.claude.defaultEffortLevel || undefined,
+    };
   }
 
   private async buildFooter(key: string, binding: SessionBinding | undefined): Promise<string> {
     const ts = formatIsoTimestamp(new Date());
+    const { model, effort } = await this.resolveModelOptions(key);
     const project = await this.effectiveProject(binding);
-    return `${ts}  |  \`${project}\``;
+    const sessionId = binding?.claudeSessionId;
+
+    const modelPart = [model, effort].filter(Boolean).join(" ");
+    const parts = ([modelPart || undefined, `\`${project}\``, sessionId] as (string | undefined)[]).filter(Boolean) as string[];
+    return parts.length ? `${ts}  |  ${parts.join(" · ")}` : ts;
   }
 
   private resolveProject(dirArg: string): string {
@@ -1301,10 +1341,10 @@ export class App {
     ]);
     const project = await this.effectiveProject(binding);
     const footer = await this.buildFooter(startupKey || "", binding);
+    const permissionMode = binding?.permissionMode || this.config.claude.permissionMode;
     const text = [
       `Claude Code: ${version || "unknown"}`,
-      `Model: ${this.config.claude.defaultModel || "(default)"}`,
-      `Project: \`${project}\``
+      `Permission: ${permissionMode}`,
     ].join("\n");
     try {
       await this.feishu?.sendStartupReady(text, footer, label);
