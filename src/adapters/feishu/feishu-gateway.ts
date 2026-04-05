@@ -16,7 +16,6 @@ type LarkLogger = {
 const FEISHU_POST_SOFT_LIMIT = 3500;
 const FEISHU_STREAM_PAGE_LIMIT = 3000;
 const STREAMING_MARKDOWN_ELEMENT_ID = "markdown_stream";
-const STREAMING_RAW_MARKDOWN_ELEMENT_ID = "markdown_raw";
 const STREAMING_FOOTER_ELEMENT_ID = "footer_meta";
 const STREAMING_LINE_DELAY_MS = 40;
 const STREAMING_MAX_LINE_UPDATES = 64;
@@ -150,8 +149,7 @@ export class FeishuGateway {
           page.text,
           message.title,
           message.template,
-          page.footer,
-          message.includeRawMarkdown
+          page.footer
         );
       }
     });
@@ -287,31 +285,6 @@ export class FeishuGateway {
         active.lastText = rendered;
       }
 
-      if (active.hasRawMarkdownElement) {
-        const nextRawMarkdown = message.includeRawMarkdown === true ? wrapRawMarkdown(rendered) : "";
-        if (nextRawMarkdown !== active.rawMarkdownContent) {
-          await this.withFeishuRetry(async () =>
-            this.client.cardkit.v1.cardElement.update({
-              path: {
-                card_id: active.cardId,
-                element_id: STREAMING_RAW_MARKDOWN_ELEMENT_ID
-              },
-              data: {
-                element: JSON.stringify({
-                  tag: "markdown",
-                  content: nextRawMarkdown,
-                  element_id: STREAMING_RAW_MARKDOWN_ELEMENT_ID
-                }),
-                sequence: active.sequence
-              }
-            }),
-            "streaming raw markdown"
-          );
-          active.sequence += 1;
-          active.rawMarkdownContent = nextRawMarkdown;
-        }
-      }
-
       if (message.finalizeStreaming) {
         await this.withFeishuRetry(async () =>
           this.client.cardkit.v1.card.settings({
@@ -364,27 +337,6 @@ export class FeishuGateway {
         }
       }
 
-      if (active.hasRawMarkdownElement) {
-        await this.withFeishuRetry(async () =>
-          this.client.cardkit.v1.cardElement.update({
-            path: {
-              card_id: active.cardId,
-              element_id: STREAMING_RAW_MARKDOWN_ELEMENT_ID
-            },
-            data: {
-              element: JSON.stringify({
-                tag: "markdown",
-                content: wrapRawMarkdown(rendered),
-                element_id: STREAMING_RAW_MARKDOWN_ELEMENT_ID
-              }),
-              sequence: active.sequence
-            }
-          }),
-          "streaming raw markdown"
-        );
-        active.sequence += 1;
-      }
-
       await this.withFeishuRetry(async () =>
         this.client.cardkit.v1.card.settings({
           path: {
@@ -421,8 +373,7 @@ export class FeishuGateway {
               message.title,
               message.template,
               footer,
-              summary,
-              message.includeRawMarkdown === true
+              summary
             )
           )
         }
@@ -458,8 +409,6 @@ export class FeishuGateway {
       sequence: 1,
       lastText: "",
       chatId: message.chatId,
-      hasRawMarkdownElement: message.includeRawMarkdown === true,
-      rawMarkdownContent: ""
     };
   }
 
@@ -504,16 +453,14 @@ export class FeishuGateway {
   async sendStartupReady(
     text: string,
     footer?: string,
-    title?: string,
-    includeRawMarkdown = false
+    title?: string
   ): Promise<void> {
     if (!this.config.startupNotifyChatId) return;
     await this.send({
       chatId: this.config.startupNotifyChatId,
       title,
       text,
-      footer,
-      includeRawMarkdown
+      footer
     });
   }
 
@@ -540,8 +487,7 @@ export class FeishuGateway {
     chunk: string,
     title?: string,
     template?: OutgoingMessage["template"],
-    footer?: string,
-    includeRawMarkdown = false
+    footer?: string
   ): Promise<void> {
     await this.withFeishuRetry(async () =>
       this.client.im.v1.message.create({
@@ -551,7 +497,7 @@ export class FeishuGateway {
         data: {
           receive_id: chatId,
           msg_type: "interactive",
-          content: buildInteractiveCardContent(chunk, title, template, footer, includeRawMarkdown)
+          content: buildInteractiveCardContent(chunk, title, template, footer)
         }
       }),
       "send"
@@ -692,8 +638,6 @@ interface ActiveStreamingCard {
   sequence: number;
   lastText: string;
   chatId: string;
-  hasRawMarkdownElement: boolean;
-  rawMarkdownContent: string;
 }
 
 interface ActivePagedStreamingState {
@@ -797,8 +741,7 @@ function buildInteractiveCardContent(
   text: string,
   title?: string,
   template: OutgoingMessage["template"] = "indigo",
-  footer?: string,
-  includeRawMarkdown = false
+  footer?: string
 ): string {
   const rendered = text.trim();
   const summary = buildCardSummary(title, rendered);
@@ -825,7 +768,6 @@ function buildInteractiveCardContent(
       vertical_spacing: "8px",
       elements: [
         { tag: "markdown", content: rendered },
-        ...(includeRawMarkdown ? [{ tag: "markdown", content: wrapRawMarkdown(rendered) }] : []),
         { tag: "markdown", content: footer || meta }
       ]
     }
@@ -837,8 +779,7 @@ function buildStreamingCard(
   title?: string,
   template: OutgoingMessage["template"] = "indigo",
   footer?: string,
-  summary?: string,
-  includeRawMarkdown = false
+  summary?: string
 ): Record<string, unknown> {
   return {
     schema: "2.0",
@@ -868,7 +809,6 @@ function buildStreamingCard(
       vertical_spacing: "8px",
       elements: [
         { tag: "markdown", content: text, element_id: STREAMING_MARKDOWN_ELEMENT_ID },
-        ...(includeRawMarkdown ? [{ tag: "markdown", content: "", element_id: STREAMING_RAW_MARKDOWN_ELEMENT_ID }] : []),
         { tag: "markdown", content: footer || buildCardMetaMarkdown(title), element_id: STREAMING_FOOTER_ELEMENT_ID }
       ]
     }
@@ -1194,7 +1134,7 @@ function buildStreamingLineFrames(text: string, maxFrames: number): string[] {
 // --- Helpers ---
 
 function buildRenderPlan(message: OutgoingMessage, maxChars: number): RenderPlan {
-  const text = message.text || "";
+  const text = renderOutgoingBody(message.text || "", message.bodyFormat);
   const pages = splitMessageText(text, maxChars);
   const skipFirstChunkFooter = hasStandalonePreamblePage(pages);
   const contentPageCount = skipFirstChunkFooter ? pages.length - 1 : pages.length;
@@ -1255,13 +1195,25 @@ function formatIsoTimestamp(date: Date): string {
   return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetMins}`;
 }
 
-function wrapRawMarkdown(text: string): string {
+function renderOutgoingBody(text: string, bodyFormat?: OutgoingMessage["bodyFormat"]): string {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!bodyFormat) return normalized;
+  if (bodyFormat === "raw-markdown") {
+    return renderFencedBlock("markdown", normalized);
+  }
+  if (bodyFormat === "raw-text") {
+    return renderFencedBlock("text", normalized);
+  }
+  return normalized;
+}
+
+function renderFencedBlock(language: string, value: string): string {
   const longestBacktickRun = Math.max(
     0,
-    ...Array.from(text.matchAll(/`+/g), (match) => match[0].length)
+    ...Array.from(value.matchAll(/`+/g), (match) => match[0].length)
   );
   const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
-  return `${fence}markdown\n${text}\n${fence}`;
+  return `${fence}${language}\n${value}\n${fence}`;
 }
 
 function formatFeishuError(error: unknown): string {

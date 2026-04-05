@@ -9,7 +9,7 @@ import { AppConfig } from "../config/env.js";
 import { conversationKeyFor } from "./conversation-key.js";
 import { parseCommand } from "./command-router.js";
 import { BindingStore } from "../store/binding-store.js";
-import { ActiveRun, IncomingMessage, OutgoingMessage, SessionBinding } from "../types/domain.js";
+import { ActiveRun, IncomingMessage, OutgoingBodyFormat, OutgoingMessage, SessionBinding } from "../types/domain.js";
 
 const execFileAsync = promisify(execFile);
 const GIT_COMMAND_TIMEOUT_MS = 30_000;
@@ -39,6 +39,7 @@ const SHELL_COMMAND_NAMES = new Set([
 
 type AppResponse = {
   text: string;
+  bodyFormat?: OutgoingBodyFormat;
   severity?: "warning" | "error";
 };
 
@@ -100,7 +101,6 @@ export class App {
           : message.text;
         const messageTitle = this.titleForCommand(commandName, titleInput);
         const messageTemplate = this.templateForCommand(commandName);
-        const includeRawMarkdown = this.shouldIncludeRawMarkdownForMessage(commandName);
         try {
           let streamed = false;
           let lastUpdateText: string | undefined;
@@ -123,8 +123,7 @@ export class App {
                   text: update,
                   replyToMessageId: message.messageId,
                   threadId: message.threadId,
-                  streaming: false,
-                  includeRawMarkdown
+                  streaming: false
                 });
               } catch (error) {
                 console.error("failed to send Feishu update", { messageId: message.messageId, error });
@@ -182,6 +181,7 @@ export class App {
           const result = await this.handleIncoming(message, sendUpdateSafely, sendStatusSafely);
           const text = typeof result === "string" ? result : result.text;
           const responseSeverity = typeof result === "string" ? undefined : result.severity;
+          const responseBodyFormat = typeof result === "string" ? undefined : result.bodyFormat;
           await statusChain;
           await streamDrain;
 
@@ -202,7 +202,7 @@ export class App {
               template: finalTemplate,
               footer: finalFooter,
               text: formattedText,
-              includeRawMarkdown,
+              bodyFormat: responseBodyFormat,
               replyToMessageId: message.messageId,
               threadId: message.threadId,
               streaming: true,
@@ -248,7 +248,7 @@ export class App {
     }
     const command = parsedCommand;
 
-    if (command?.name === "help") return this.handleHelp();
+    if (command?.name === "help") return this.handleHelp(new ArgCursor(command.args));
     if (command?.name === "status") return this.handleStatus(message, new ArgCursor(command.args));
     if (command?.name === "new") return this.handleNew(message, new ArgCursor(command.args));
     if (command?.name === "stop") return this.handleStop(message);
@@ -304,14 +304,15 @@ export class App {
 
   // ---- Command handlers ----
 
-  private handleHelp(): string {
-    return [
+  private handleHelp(cursor: ArgCursor): string | AppResponse {
+    const rawMarkdownOnly = cursor.takeFlag("--raw-markdown");
+    const text = [
       "## Core",
       "",
-      "- `/help` show commands",
+      "- `/help [--raw-markdown]` show commands",
       "- `/status` show current session and bridge state",
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
-      "- `/session [list [-n <count>] [--all] [--project <path>]] [-h|--help]` inspect current session or browse recent sessions",
+      "- `/session [list [-n <count>] [--all] [--project <path>]] [--raw-markdown] [-h|--help]` inspect current session or browse recent sessions",
       "- `/resume [<session-id>|--last|-n <index>|--list] [-C <dir>] [-h|--help]` bind a previous session",
       "- `/rename [<name>] [-h|--help]` show or set the current session title",
       "- `/stop` stop the current active run",
@@ -334,13 +335,15 @@ export class App {
       "## Diagnostics",
       "",
       "- `/feishu [ws|doctor]` show Feishu websocket and outbound send diagnostics",
-      "- `/log [-n <count>]` show recent bridge service logs from systemd journal"
+      "- `/log [-n <count>]` show recent bridge service logs from systemd journal",
+      "",
+      "## Notes",
+      "",
+      "- Add `--raw-markdown` to `/help` or `/session` to return fenced source markdown instead of rendered markdown."
     ].join("\n");
+    return this.withBodyFormat(text, rawMarkdownOnly ? "raw-markdown" : undefined);
   }
 
-  private shouldIncludeRawMarkdownForMessage(commandName?: string): boolean {
-    return commandName === "help";
-  }
 
   private async handleStatus(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
     const key = conversationKeyFor(message);
@@ -891,10 +894,16 @@ export class App {
 
   private async handleSession(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
+    const rawMarkdownOnly = cursor.takeFlag("--raw-markdown");
+    const bodyFormat: OutgoingBodyFormat | undefined = rawMarkdownOnly ? "raw-markdown" : undefined;
     const sub = cursor.shift();
-    if (sub === "-h" || sub === "--help") return this.sessionHelpText();
+    if (sub === "-h" || sub === "--help") {
+      return this.withBodyFormat(this.sessionHelpText(), bodyFormat);
+    }
     if (sub === "list") {
-      if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.sessionHelpText();
+      if (cursor.peek() === "-h" || cursor.peek() === "--help") {
+        return this.withBodyFormat(this.sessionHelpText(), bodyFormat);
+      }
       const allProjects = cursor.takeFlag("--all");
       const projectArg = cursor.takeOption("--project");
       const countRaw = cursor.takeOption("-n");
@@ -957,11 +966,11 @@ export class App {
         return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${flags || "-"} |`;
       });
 
-      return [header, divider, ...rows].join("\n");
+      return this.withBodyFormat([header, divider, ...rows].join("\n"), bodyFormat);
     }
     const binding = await this.store.get(key);
     if (!binding?.claudeSessionId) {
-      return "No active session. Send a message or use `/new` to start.";
+      return this.withBodyFormat("No active session. Send a message or use `/new` to start.", bodyFormat);
     }
     const sessionInfo = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
     const formatSize = (bytes?: number) => {
@@ -970,7 +979,7 @@ export class App {
       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
       return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     };
-    return [
+    const text = [
       `**Session**: \`${binding.claudeSessionId}\``,
       `**Project**: \`${binding.project}\``,
       ...(sessionInfo?.createdAt ? [`**Created**: ${new Date(sessionInfo.createdAt).toISOString().slice(0, 19).replace("T", " ")}`] : []),
@@ -981,6 +990,7 @@ export class App {
       ...(sessionInfo?.gitBranch ? [`**Branch**: \`${sessionInfo.gitBranch}\``] : []),
       ...(sessionInfo?.summary ? [`**Summary**: ${sessionInfo.summary}`] : [])
     ].join("\n");
+    return this.withBodyFormat(text, bodyFormat);
   }
 
   private resumeHelpText(): string {
@@ -1423,6 +1433,17 @@ export class App {
     const modelPart = [model, effort].filter(Boolean).join(" ");
     const parts = ([modelPart || undefined, `\`${project}\``, sessionId] as (string | undefined)[]).filter(Boolean) as string[];
     return parts.length ? `${ts}  |  ${parts.join(" · ")}` : ts;
+  }
+
+  private withBodyFormat(
+    result: string | AppResponse,
+    bodyFormat?: OutgoingBodyFormat
+  ): string | AppResponse {
+    if (!bodyFormat) return result;
+    if (typeof result === "string") {
+      return { text: result, bodyFormat };
+    }
+    return { ...result, bodyFormat };
   }
 
   private resolveProject(dirArg: string): string {

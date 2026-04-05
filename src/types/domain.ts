@@ -1,5 +1,6 @@
 export type FeishuConversationKey = string;
 export type ClaudeSessionId = string;
+export type OutgoingBodyFormat = "raw-markdown" | "raw-text";
 
 export interface SessionBinding {
   conversationKey: FeishuConversationKey;
@@ -32,6 +33,7 @@ export interface OutgoingMessage {
   chatId: string;
   title?: string;
   text?: string;
+  bodyFormat?: OutgoingBodyFormat;
   template?: "blue" | "wathet" | "turquoise" | "green" | "yellow" | "orange" | "red" | "carmine" | "violet" | "purple" | "indigo" | "grey" | "default";
   footer?: string;
   replyToMessageId?: string;
@@ -39,7 +41,6 @@ export interface OutgoingMessage {
   streaming?: boolean;
   streamKey?: string;
   finalizeStreaming?: boolean;
-  includeRawMarkdown?: boolean;
   suppressChunkFooter?: boolean;
   preserveStreamingPages?: boolean;
 }

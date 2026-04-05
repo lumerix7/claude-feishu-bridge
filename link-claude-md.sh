@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Link CLAUDE.md → README.md so Claude Code reads the same docs.
+# Link CLAUDE.md → AGENTS.md so Claude Code reads the same docs.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
-ln -sf README.md CLAUDE.md
-echo "Linked CLAUDE.md → README.md"
+ln -sf AGENTS.md CLAUDE.md
+echo "Linked CLAUDE.md → AGENTS.md"

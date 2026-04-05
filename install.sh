@@ -27,7 +27,6 @@ echo "note:   bridge.env holds secrets; config.json holds tuning. Both preserved
 cd "${ROOT_DIR}"
 npm install
 npm run build
-bash link-claude-md.sh
 
 # 2. Global install via npm pack
 PACK_FILE="$(npm pack --json | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['filename'])")"

@@ -167,4 +167,4 @@ npm run cli         # local REPL — no Feishu, tests commands interactively
 bash install.sh     # full deploy: build → pack → install globally → restart service
 ```
 
-`CLAUDE.md` is a symlink to this file (for Claude Code context). Run `bash link-claude-md.sh` to recreate it after a fresh clone.
+`CLAUDE.md` is a symlink to `AGENTS.md` (for Claude Code context). Run `bash link-claude-md.sh` to recreate it after a fresh clone.
