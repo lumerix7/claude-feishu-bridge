@@ -260,26 +260,26 @@ export class App {
     if (command?.name === "rename") return this.handleRename(message, new ArgCursor(command.args));
 
     // File system commands
-    if (command?.name === "git") return this.handleShellCommand(message, "git", command.args);
+    if (command?.name === "git") return this.handleShellCommand(message, "git", command.args, onStatus);
     if (command?.name === "pwd") return this.handlePwd(message);
-    if (command?.name === "ls") return this.handleShellCommand(message, "ls", command.args);
-    if (command?.name === "cat") return this.handleShellCommand(message, "cat", command.args);
-    if (command?.name === "head") return this.handleShellCommand(message, "head", command.args);
-    if (command?.name === "tail") return this.handleShellCommand(message, "tail", command.args);
-    if (command?.name === "find") return this.handleShellCommand(message, "find", command.args);
-    if (command?.name === "rg") return this.handleShellCommand(message, "rg", command.args);
-    if (command?.name === "tree") return this.handleShellCommand(message, "tree", command.args);
-    if (command?.name === "wc") return this.handleShellCommand(message, "wc", command.args);
-    if (command?.name === "cp") return this.handleShellCommand(message, "cp", command.args);
-    if (command?.name === "mv") return this.handleShellCommand(message, "mv", command.args);
-    if (command?.name === "mkdir") return this.handleShellCommand(message, "mkdir", command.args);
-    if (command?.name === "touch") return this.handleShellCommand(message, "touch", command.args);
-    if (command?.name === "ln") return this.handleShellCommand(message, "ln", command.args);
-    if (command?.name === "rmdir") return this.handleShellCommand(message, "rmdir", command.args);
-    if (command?.name === "readlink") return this.handleShellCommand(message, "readlink", command.args);
-    if (command?.name === "sha256sum") return this.handleShellCommand(message, "sha256sum", command.args);
-    if (command?.name === "tar") return this.handleShellCommand(message, "tar", command.args);
-    if (command?.name === "trash") return this.handleShellCommand(message, "trash", command.args);
+    if (command?.name === "ls") return this.handleShellCommand(message, "ls", command.args, onStatus);
+    if (command?.name === "cat") return this.handleShellCommand(message, "cat", command.args, onStatus);
+    if (command?.name === "head") return this.handleShellCommand(message, "head", command.args, onStatus);
+    if (command?.name === "tail") return this.handleShellCommand(message, "tail", command.args, onStatus);
+    if (command?.name === "find") return this.handleShellCommand(message, "find", command.args, onStatus);
+    if (command?.name === "rg") return this.handleShellCommand(message, "rg", command.args, onStatus);
+    if (command?.name === "tree") return this.handleShellCommand(message, "tree", command.args, onStatus);
+    if (command?.name === "wc") return this.handleShellCommand(message, "wc", command.args, onStatus);
+    if (command?.name === "cp") return this.handleShellCommand(message, "cp", command.args, onStatus);
+    if (command?.name === "mv") return this.handleShellCommand(message, "mv", command.args, onStatus);
+    if (command?.name === "mkdir") return this.handleShellCommand(message, "mkdir", command.args, onStatus);
+    if (command?.name === "touch") return this.handleShellCommand(message, "touch", command.args, onStatus);
+    if (command?.name === "ln") return this.handleShellCommand(message, "ln", command.args, onStatus);
+    if (command?.name === "rmdir") return this.handleShellCommand(message, "rmdir", command.args, onStatus);
+    if (command?.name === "readlink") return this.handleShellCommand(message, "readlink", command.args, onStatus);
+    if (command?.name === "sha256sum") return this.handleShellCommand(message, "sha256sum", command.args, onStatus);
+    if (command?.name === "tar") return this.handleShellCommand(message, "tar", command.args, onStatus);
+    if (command?.name === "trash") return this.handleShellCommand(message, "trash", command.args, onStatus);
 
     if (command?.name === "feishu") return this.handleFeishu(new ArgCursor(command.args));
     if (command?.name === "log") return this.handleLog(new ArgCursor(command.args));
@@ -1183,13 +1183,15 @@ export class App {
   private async handleShellCommand(
     message: IncomingMessage,
     command: string,
-    args: string[]
+    args: string[],
+    onStatus?: (text: string) => Promise<void>
   ): Promise<string | AppResponse> {
     const binding = await this.store.get(conversationKeyFor(message));
     const project = await this.effectiveProject(binding);
     if (!this.isAllowedProject(project)) {
       return { text: `Project path not allowed: ${project}`, severity: "warning" };
     }
+    await onStatus?.(this.renderLocalCommandPreamble(command, args, message.text));
     try {
       const { stdout, stderr } = await execFileAsync(command, args, {
         cwd: project,
@@ -1197,11 +1199,18 @@ export class App {
         maxBuffer: 8 * 1024 * 1024
       });
       const combined = [stdout, stderr].filter(Boolean).join(stderr && stdout ? "\n" : "");
-      return this.renderFencedBlock("text", this.truncateOutput(combined || "(no output)"));
+      return {
+        text: this.truncateOutput(combined || "(no output)"),
+        bodyFormat: "raw-text"
+      };
     } catch (err) {
       const error = err as Error & { stdout?: string; stderr?: string };
       const output = [error.stdout, error.stderr].filter(Boolean).join(error.stdout && error.stderr ? "\n" : "");
-      return { text: this.renderFencedBlock("text", this.truncateOutput(output || error.message)), severity: "error" };
+      return {
+        text: this.truncateOutput(output || error.message),
+        bodyFormat: "raw-text",
+        severity: "error"
+      };
     }
   }
 
@@ -1234,12 +1243,28 @@ export class App {
     }
   }
 
+  private renderLocalCommandPreamble(
+    command: string,
+    args: string[],
+    rawInput: string
+  ): string {
+    const normalizedInput = rawInput
+      .replace(/\r\n/g, "\n")
+      .trimStart()
+      .replace(/^\//, "");
+    return [
+      `Running \`${command}\`...`,
+      "",
+      this.renderFencedBlock("text", normalizedInput)
+    ].join("\n");
+  }
+
   private renderFencedBlock(language: string, value: string): string {
     const longestBacktickRun = Math.max(
       0,
       ...Array.from(value.matchAll(/`+/g), (match) => match[0].length)
     );
-    const fence = "`".repeat(longestBacktickRun > 0 ? longestBacktickRun + 1 : 3);
+    const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
     return `${fence}${language}\n${value}\n${fence}`;
   }
 
