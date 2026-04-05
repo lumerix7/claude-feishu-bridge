@@ -880,6 +880,11 @@ function buildStreamingCard(
 function splitMessageText(text: string, maxChars: number): string[] {
   if (maxChars <= 0 || text.length <= maxChars) return [text];
 
+  const tableChunks = splitMarkdownTableText(text, maxChars);
+  if (tableChunks) {
+    return tableChunks;
+  }
+
   const blocks = splitMarkdownBlocks(text);
   const chunks: string[] = [];
   let current = "";
@@ -894,14 +899,16 @@ function splitMessageText(text: string, maxChars: number): string[] {
     if (!block.trim()) continue;
     if (block.length > maxChars) {
       pushCurrent();
-      chunks.push(...splitPlainTextBlock(block, maxChars));
+      chunks.push(...splitOversizedMarkdownBlock(block, maxChars));
       continue;
     }
+
     const candidate = current ? `${current}\n\n${block}` : block;
     if (candidate.length <= maxChars) {
       current = candidate;
       continue;
     }
+
     pushCurrent();
     current = block;
   }
@@ -951,17 +958,169 @@ function splitMarkdownBlocks(text: string): string[] {
   return blocks;
 }
 
-function splitPlainTextBlock(text: string, maxChars: number): string[] {
+function splitMarkdownTableText(text: string, maxChars: number): string[] | undefined {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const tableStart = findTopLevelMarkdownTableStart(lines);
+  if (tableStart < 0) return undefined;
+
+  const tableHeader = lines[tableStart];
+  const tableSeparator = lines[tableStart + 1];
+  const prefix = lines.slice(0, tableStart).join("\n").trim();
+  const rows: string[] = [];
+  let endIndex = tableStart + 2;
+  for (; endIndex < lines.length; endIndex += 1) {
+    const line = lines[endIndex];
+    if (!line.trim()) continue;
+    if (!line.trim().startsWith("|")) break;
+    rows.push(line);
+  }
+  if (rows.length === 0) return undefined;
+  const suffix = lines.slice(endIndex).join("\n").trim();
+
+  const tableOnlyHeader = [tableHeader, tableSeparator].join("\n");
+  const firstPageHeader = prefix
+    ? `${prefix}\n\n${tableHeader}\n${tableSeparator}`
+    : tableOnlyHeader;
+  if (firstPageHeader.length > maxChars || tableOnlyHeader.length > maxChars) {
+    return undefined;
+  }
+
+  const chunks: string[] = [];
+  let current = firstPageHeader;
+  const continuationHeader = tableOnlyHeader;
+  for (const row of rows) {
+    const candidate = `${current}\n${row}`;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      continue;
+    }
+    if (current === firstPageHeader || current === continuationHeader) {
+      return undefined;
+    }
+    chunks.push(current);
+    current = `${continuationHeader}\n${row}`;
+    if (current.length > maxChars) {
+      return undefined;
+    }
+  }
+
+  if (suffix) {
+    const withSuffix = `${current}\n\n${suffix}`;
+    if (withSuffix.length <= maxChars) {
+      current = withSuffix;
+    } else {
+      chunks.push(current);
+      const suffixChunks = splitMessageText(suffix, maxChars);
+      if (suffixChunks.length === 0) {
+        return undefined;
+      }
+      chunks.push(...suffixChunks.slice(0, -1));
+      current = suffixChunks[suffixChunks.length - 1] || "";
+    }
+  }
+
+  if (current.trim()) {
+    chunks.push(current);
+  }
+  return chunks.length > 1 ? chunks : undefined;
+}
+
+function findTopLevelMarkdownTableStart(lines: string[]): number {
+  let inFence = false;
+  let openFence: FenceInfo | undefined;
+
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const line = lines[index] || "";
+    if (!inFence) {
+      const openingFence = parseOpeningFenceLine(line);
+      if (openingFence) {
+        inFence = true;
+        openFence = openingFence;
+        continue;
+      }
+      if (!line.trim().startsWith("|")) continue;
+      const next = lines[index + 1] || "";
+      if (/^\|\s*[:\-| ]+\|\s*$/.test(next.trim())) {
+        return index;
+      }
+      continue;
+    }
+
+    if (openFence && isClosingFenceLine(line, openFence)) {
+      inFence = false;
+      openFence = undefined;
+    }
+  }
+
+  return -1;
+}
+
+function splitOversizedMarkdownBlock(block: string, maxChars: number): string[] {
+  const fenceInfo = parseOpeningFenceLine(block.split("\n", 1)[0] || "");
+  if (!fenceInfo) {
+    return splitPlainTextBlock(block, maxChars);
+  }
+
+  const lines = block.split("\n");
+  const closingIndex = findClosingFenceIndex(lines, fenceInfo);
+  if (closingIndex <= 0) {
+    return splitPlainTextBlock(block, maxChars);
+  }
+
+  const opening = lines[0];
+  const openingSuffix = opening.slice(fenceInfo.length);
+  const body = lines.slice(1, closingIndex).join("\n");
+  const wrapperFenceLength = Math.max(
+    fenceInfo.length,
+    longestFenceRun(body, fenceInfo.char) > 0 ? longestFenceRun(body, fenceInfo.char) + 1 : 3
+  );
+  const wrapperFence = fenceInfo.char.repeat(wrapperFenceLength);
+  const wrappedOpening = `${wrapperFence}${openingSuffix}`;
+  const wrappedClosing = wrapperFence;
+  const wrapperCost = wrappedOpening.length + wrappedClosing.length + 2;
+  const innerMax = Math.max(1, maxChars - wrapperCost);
+  const innerChunks = splitPlainTextBlock(body, innerMax, true);
+  return innerChunks.map((chunk) => `${wrappedOpening}\n${chunk}\n${wrappedClosing}`);
+}
+
+function splitPlainTextBlock(text: string, maxChars: number, preserveWhitespace = false): string[] {
   if (text.length <= maxChars) return [text];
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > maxChars) {
     const splitAt = pickSplitPoint(remaining, maxChars);
-    chunks.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt).trimStart();
+    const nextChunk = remaining.slice(0, splitAt);
+    chunks.push(preserveWhitespace ? nextChunk : nextChunk.trimEnd());
+    remaining = preserveWhitespace ? remaining.slice(splitAt) : remaining.slice(splitAt).trimStart();
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+function findClosingFenceIndex(lines: string[], openingFence: FenceInfo): number {
+  for (let index = 1; index < lines.length; index += 1) {
+    if (isClosingFenceLine(lines[index], openingFence)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function longestFenceRun(text: string, char: "`" | "~"): number {
+  const pattern = char === "`" ? /`+/g : /~+/g;
+  return Math.max(0, ...Array.from(text.matchAll(pattern), (match) => match[0].length));
+}
+
+function hasStandalonePreamblePage(pages: string[]): boolean {
+  if (pages.length < 2) return false;
+  const first = pages[0]?.trimStart() || "";
+  const second = pages[1]?.trimStart() || "";
+  return !isFencedBlockStart(first) && isFencedBlockStart(second);
+}
+
+function isFencedBlockStart(text: string): boolean {
+  return /^(`{3,}|~{3,})/.test(text);
 }
 
 function pickSplitPoint(text: string, maxChars: number): number {
@@ -1037,16 +1196,19 @@ function buildStreamingLineFrames(text: string, maxFrames: number): string[] {
 function buildRenderPlan(message: OutgoingMessage, maxChars: number): RenderPlan {
   const text = message.text || "";
   const pages = splitMessageText(text, maxChars);
-  const contentPageCount = pages.length;
+  const skipFirstChunkFooter = hasStandalonePreamblePage(pages);
+  const contentPageCount = skipFirstChunkFooter ? pages.length - 1 : pages.length;
   return {
     pages: pages.map((pageText, index) => ({
       text: pageText,
-      footer: formatChunkFooter(
-        message.footer,
-        index,
-        contentPageCount,
-        message.suppressChunkFooter
-      )
+      footer: skipFirstChunkFooter && index === 0
+        ? message.footer
+        : formatChunkFooter(
+            message.footer,
+            skipFirstChunkFooter ? index - 1 : index,
+            contentPageCount,
+            message.suppressChunkFooter
+          )
     }))
   };
 }

@@ -257,6 +257,7 @@ export class App {
     if (command?.name === "project") return this.handleProject(message, new ArgCursor(command.args));
     if (command?.name === "session") return this.handleSession(message, new ArgCursor(command.args));
     if (command?.name === "resume") return this.handleResume(message, new ArgCursor(command.args));
+    if (command?.name === "rename") return this.handleRename(message, new ArgCursor(command.args));
 
     // File system commands
     if (command?.name === "git") return this.handleShellCommand(message, "git", command.args);
@@ -312,6 +313,7 @@ export class App {
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
       "- `/session [list [-n <count>] [--all] [--project <path>]] [-h|--help]` inspect current session or browse recent sessions",
       "- `/resume [<session-id>|--last|-n <index>|--list] [-C <dir>] [-h|--help]` bind a previous session",
+      "- `/rename [<name>] [-h|--help]` show or set the current session title",
       "- `/stop` stop the current active run",
       "",
       "## Claude",
@@ -812,6 +814,81 @@ export class App {
     ].join("\n");
   }
 
+  private renameHelpText(): string {
+    return [
+      "Show or set the title of the current Claude session.",
+      "",
+      "## Usage",
+      "",
+      "- `/rename` — show the current session title",
+      "- `/rename <name>` — set a custom title for the current session",
+      "- `/rename <session-id> <name>` — set a custom title for a specific session",
+      "- `/rename -h|--help` — show this help",
+      "",
+      "## Options",
+      "",
+      "- `-h, --help` show rename help",
+      "",
+      "## Notes",
+      "",
+      "The title appears in `/session list` and in the Claude Code session history.",
+      "Session IDs can be found with `/session list`."
+    ].join("\n");
+  }
+
+  private async handleRename(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
+    const key = conversationKeyFor(message);
+
+    const tok = cursor.peek();
+    if (tok === "-h" || tok === "--help") return this.renameHelpText();
+
+    const binding = await this.store.get(key);
+    if (!binding?.claudeSessionId) {
+      return "No active session. Send a message or use `/new` to start.";
+    }
+
+    if (cursor.isEmpty()) {
+      // Show current title
+      const info = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
+      if (!info) return `**Session**: \`${binding.claudeSessionId}\`\n**Title**: (none)`;
+      const title = info.customTitle || info.summary || "(none)";
+      return [
+        `**Session**: \`${binding.claudeSessionId}\``,
+        `**Title**: ${info.customTitle ? `_${info.customTitle}_` : title}`,
+      ].join("\n");
+    }
+
+    // Collect all remaining tokens as parts of the name (or session-id + name)
+    const args: string[] = [];
+    while (!cursor.isEmpty()) {
+      const t = cursor.shift();
+      if (t) args.push(t);
+    }
+
+    // Disambiguate: if first token looks like a UUID, treat as <session-id> <name>
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let sessionId = binding.claudeSessionId;
+    let name: string;
+    if (args.length >= 2 && UUID_RE.test(args[0]!)) {
+      sessionId = args[0]!;
+      name = args.slice(1).join(" ").trim();
+    } else {
+      name = args.join(" ").trim();
+    }
+
+    if (!name) {
+      return this.renderCommandError("Rename", "missing title", "/rename <name>");
+    }
+
+    try {
+      await this.claude.renameSession(sessionId, name);
+      return `Renamed \`${sessionId}\` → _${name}_`;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return this.renderCommandError("Rename", msg);
+    }
+  }
+
   private async handleSession(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
     const sub = cursor.shift();
@@ -842,14 +919,27 @@ export class App {
       const currentSessionId = (await this.store.get(key))?.claudeSessionId;
       const boundIds = new Set(allBindings.map((b) => b.claudeSessionId).filter(Boolean));
 
+      // Sort: current first, then project asc, then updated desc
+      sessions.sort((a, b) => {
+        const aCur = a.sessionId === currentSessionId ? 0 : 1;
+        const bCur = b.sessionId === currentSessionId ? 0 : 1;
+        if (aCur !== bCur) return aCur - bCur;
+        const aProj = a.cwd || "";
+        const bProj = b.cwd || "";
+        if (aProj !== bProj) return aProj.localeCompare(bProj);
+        const aTime = a.lastModified ? new Date(a.lastModified).getTime() : 0;
+        const bTime = b.lastModified ? new Date(b.lastModified).getTime() : 0;
+        return bTime - aTime;
+      });
+
       // Fetch last user message for each session in parallel
       const lastMessages = await Promise.all(
         sessions.map((s) => this.claude.getLastUserMessage(s.sessionId).catch(() => undefined))
       );
 
       const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
-      const header = "| # | Project | Updated | Session | Last message | Summary | Branch | Flags |";
-      const divider = "| --- | --- | --- | --- | --- | --- | --- | --- |";
+      const header = "| # | Project | Updated | Session | Last message | Summary | Flags |";
+      const divider = "| --- | --- | --- | --- | --- | --- | --- |";
       const rows = sessions.map((s, i) => {
         const project = s.cwd ? `\`${s.cwd}\`` : "-";
         const updated = s.lastModified
@@ -858,14 +948,13 @@ export class App {
         const sessionId = `\`${s.sessionId}\``;
         const lastMsg = lastMessages[i] ? escapeCell(lastMessages[i]!) : "-";
         const summary = escapeCell(s.summary || s.firstPrompt || "(no preview)");
-        const branch = s.gitBranch ? `\`${s.gitBranch}\`` : "-";
         const flags = [
           s.sessionId === currentSessionId ? "**current**" : "",
           boundIds.has(s.sessionId) && s.sessionId !== currentSessionId ? "bound" : "",
           s.tag ? `\`${s.tag}\`` : "",
           s.customTitle ? `_${s.customTitle}_` : ""
         ].filter(Boolean).join(" ");
-        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${branch} | ${flags || "-"} |`;
+        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${flags || "-"} |`;
       });
 
       return [header, divider, ...rows].join("\n");
@@ -875,10 +964,20 @@ export class App {
       return "No active session. Send a message or use `/new` to start.";
     }
     const sessionInfo = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
+    const formatSize = (bytes?: number) => {
+      if (bytes == null) return undefined;
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
     return [
       `**Session**: \`${binding.claudeSessionId}\``,
       `**Project**: \`${binding.project}\``,
+      ...(sessionInfo?.createdAt ? [`**Created**: ${new Date(sessionInfo.createdAt).toISOString().slice(0, 19).replace("T", " ")}`] : []),
       `**Updated**: ${binding.updatedAt}`,
+      ...(sessionInfo?.fileSize != null ? [`**File size**: ${formatSize(sessionInfo.fileSize)}`] : []),
+      ...(sessionInfo?.customTitle ? [`**Title**: ${sessionInfo.customTitle}`] : []),
+      ...(sessionInfo?.tag ? [`**Tag**: \`${sessionInfo.tag}\``] : []),
       ...(sessionInfo?.gitBranch ? [`**Branch**: \`${sessionInfo.gitBranch}\``] : []),
       ...(sessionInfo?.summary ? [`**Summary**: ${sessionInfo.summary}`] : [])
     ].join("\n");
@@ -955,6 +1054,18 @@ export class App {
       if (sessions.length === 0) return "No sessions.";
       const currentSessionId = binding?.claudeSessionId;
       const boundIds = new Set(allBindings.map((b) => b.claudeSessionId).filter(Boolean));
+      // Sort: current first, then project asc, then updated desc
+      sessions.sort((a, b) => {
+        const aCur = a.sessionId === currentSessionId ? 0 : 1;
+        const bCur = b.sessionId === currentSessionId ? 0 : 1;
+        if (aCur !== bCur) return aCur - bCur;
+        const aProj = a.cwd || "";
+        const bProj = b.cwd || "";
+        if (aProj !== bProj) return aProj.localeCompare(bProj);
+        const aTime = a.lastModified ? new Date(a.lastModified).getTime() : 0;
+        const bTime = b.lastModified ? new Date(b.lastModified).getTime() : 0;
+        return bTime - aTime;
+      });
       const lastMessages = await Promise.all(
         sessions.map((s) => this.claude.getLastUserMessage(s.sessionId).catch(() => undefined))
       );
@@ -990,6 +1101,18 @@ export class App {
       if (sessions.length === 0) {
         return this.renderCommandError("Resume", "no sessions found in current scope", "`/resume --list [--all]`");
       }
+      const currentSessionIdForSort = binding?.claudeSessionId;
+      sessions.sort((a, b) => {
+        const aCur = a.sessionId === currentSessionIdForSort ? 0 : 1;
+        const bCur = b.sessionId === currentSessionIdForSort ? 0 : 1;
+        if (aCur !== bCur) return aCur - bCur;
+        const aProj = a.cwd || "";
+        const bProj = b.cwd || "";
+        if (aProj !== bProj) return aProj.localeCompare(bProj);
+        const aTime = a.lastModified ? new Date(a.lastModified).getTime() : 0;
+        const bTime = b.lastModified ? new Date(b.lastModified).getTime() : 0;
+        return bTime - aTime;
+      });
       if (last) {
         sessionId = sessions[0]?.sessionId;
       } else {
@@ -1061,15 +1184,14 @@ export class App {
       const { stdout, stderr } = await execFileAsync(command, args, {
         cwd: project,
         timeout: GIT_COMMAND_TIMEOUT_MS,
-        maxBuffer: 512 * 1024
+        maxBuffer: 8 * 1024 * 1024
       });
-      const output = (stdout || stderr || "(no output)").trim();
-      const truncated = output.length > 8000 ? output.slice(0, 8000) + "\n... (truncated)" : output;
-      return `\`\`\`\n${truncated}\n\`\`\``;
+      const combined = [stdout, stderr].filter(Boolean).join(stderr && stdout ? "\n" : "");
+      return this.renderFencedBlock("text", this.truncateOutput(combined || "(no output)"));
     } catch (err) {
       const error = err as Error & { stdout?: string; stderr?: string };
-      const output = (error.stderr || error.stdout || error.message).trim();
-      return { text: `\`\`\`\n${output.slice(0, 4000)}\n\`\`\``, severity: "error" };
+      const output = [error.stdout, error.stderr].filter(Boolean).join(error.stdout && error.stderr ? "\n" : "");
+      return { text: this.renderFencedBlock("text", this.truncateOutput(output || error.message)), severity: "error" };
     }
   }
 
@@ -1078,7 +1200,7 @@ export class App {
     if (sub === "ws" || sub === "doctor") {
       if (!this.feishu) return "Feishu gateway not initialized.";
       const diag = this.feishu.diagnostics();
-      return `\`\`\`json\n${JSON.stringify(diag, null, 2)}\n\`\`\``;
+      return this.renderFencedBlock("json", JSON.stringify(diag, null, 2));
     }
     return [
       "**Feishu subcommands**:",
@@ -1096,10 +1218,25 @@ export class App {
         ["--user", "-u", "claude-feishu-bridge", "-n", String(limit), "--no-pager"],
         { timeout: 10_000, maxBuffer: 256 * 1024 }
       );
-      return `\`\`\`\n${stdout.trim() || "(no logs)"}\n\`\`\``;
+      return this.renderFencedBlock("text", this.truncateOutput(stdout.trim() || "(no logs)"));
     } catch (err) {
-      return `\`\`\`\n${(err as Error).message}\n\`\`\``;
+      return this.renderFencedBlock("text", (err as Error).message);
     }
+  }
+
+  private renderFencedBlock(language: string, value: string): string {
+    const longestBacktickRun = Math.max(
+      0,
+      ...Array.from(value.matchAll(/`+/g), (match) => match[0].length)
+    );
+    const fence = "`".repeat(longestBacktickRun > 0 ? longestBacktickRun + 1 : 3);
+    return `${fence}${language}\n${value}\n${fence}`;
+  }
+
+  private truncateOutput(value: string): string {
+    const limit = this.config.claude.outputSoftLimit;
+    if (value.length <= limit) return value;
+    return `${value.slice(0, limit)}\n\n[output truncated]`;
   }
 
   // ---- Claude turn execution ----

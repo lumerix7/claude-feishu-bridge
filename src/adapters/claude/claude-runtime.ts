@@ -6,6 +6,7 @@ import {
   listSessions as sdkListSessions,
   getSessionInfo as sdkGetSessionInfo,
   getSessionMessages as sdkGetSessionMessages,
+  renameSession as sdkRenameSession,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Query,
@@ -578,6 +579,10 @@ export class SdkClaudeBackend implements ClaudeBackend {
       }
     } catch {}
     return undefined;
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<void> {
+    await sdkRenameSession(sessionId, title);
   }
 
   async getVersion(): Promise<string | undefined> {

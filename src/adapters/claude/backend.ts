@@ -45,5 +45,6 @@ export interface ClaudeBackend {
   listSessions(dir?: string, limit?: number): Promise<SDKSessionInfo[]>;
   getSessionInfo(sessionId: string): Promise<SDKSessionInfo | undefined>;
   getLastUserMessage(sessionId: string): Promise<string | undefined>;
+  renameSession(sessionId: string, title: string): Promise<void>;
   getVersion(): Promise<string | undefined>;
 }
