@@ -52,6 +52,7 @@
 - Prefer fixing behavior in the app layer or gateway once, not by adding command-specific rendering hacks in multiple places.
 - Preserve the streaming-first Feishu behavior. Rich card updates and pagination are part of the intended UX.
 - Keep shell passthrough commands constrained to the bound project and allowed roots model.
+- Keep wrapped command handling centralized: usage/validation issues stay warning/orange, and executed wrapped commands return one raw output shape with merged stdout/stderr plus a leading `Code: ...` line; non-zero exits render red.
 - Useful runtime checks:
   - `systemctl --user cat claude-feishu-bridge`
   - `systemctl --user status claude-feishu-bridge`

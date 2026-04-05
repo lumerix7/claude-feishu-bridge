@@ -1198,18 +1198,22 @@ export class App {
         timeout: GIT_COMMAND_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024
       });
-      const combined = [stdout, stderr].filter(Boolean).join(stderr && stdout ? "\n" : "");
+      const combined = this.combineCommandOutput(stdout, stderr);
       return {
-        text: this.truncateOutput(combined || "(no output)"),
+        text: this.renderWrappedCommandOutput(combined),
         bodyFormat: "raw-text"
       };
     } catch (err) {
-      const error = err as Error & { stdout?: string; stderr?: string };
-      const output = [error.stdout, error.stderr].filter(Boolean).join(error.stdout && error.stderr ? "\n" : "");
+      const error = err as Error & { code?: number | string; stdout?: string; stderr?: string };
+      const output = this.combineCommandOutput(error.stdout, error.stderr);
+      const formatted = this.renderWrappedCommandOutput(
+        output || error.message || `${command} command failed`,
+        error.code
+      );
       return {
-        text: this.truncateOutput(output || error.message),
-        bodyFormat: "raw-text",
-        severity: "error"
+        severity: error.code === undefined || error.code === 0 || error.code === "0" ? undefined : "error",
+        text: formatted,
+        bodyFormat: "raw-text"
       };
     }
   }
@@ -1228,7 +1232,7 @@ export class App {
     ].join("\n");
   }
 
-  private async handleLog(cursor: ArgCursor): Promise<string> {
+  private async handleLog(cursor: ArgCursor): Promise<string | AppResponse> {
     const nOpt = cursor.takeOption("-n");
     const limit = nOpt ? parseInt(nOpt, 10) || 30 : 30;
     try {
@@ -1238,8 +1242,21 @@ export class App {
         { timeout: 10_000, maxBuffer: 256 * 1024 }
       );
       return this.renderFencedBlock("text", this.truncateOutput(stdout.trim() || "(no logs)"));
-    } catch (err) {
-      return this.renderFencedBlock("text", (err as Error).message);
+    } catch (error) {
+      const maybe = error as Error & { stdout?: string; stderr?: string; code?: number | string };
+      const output = [maybe.stdout, maybe.stderr].filter(Boolean).join(maybe.stdout && maybe.stderr ? "\n" : "");
+      return {
+        severity: "error",
+        text: [
+          "# Log",
+          "",
+          `- **Unit**: \`claude-feishu-bridge.service\``,
+          `- **Status**: \`failed\``,
+          `- **Code**: \`${String(maybe.code ?? "(unknown)")}\``,
+          "",
+          this.renderFencedBlock("text", this.truncateOutput(output || maybe.message || "journalctl failed"))
+        ].join("\n")
+      };
     }
   }
 
@@ -1257,6 +1274,18 @@ export class App {
       "",
       this.renderFencedBlock("text", normalizedInput)
     ].join("\n");
+  }
+
+  private combineCommandOutput(stdout?: string, stderr?: string): string {
+    return [stdout, stderr].filter(Boolean).join(stderr && stdout ? "\n" : "");
+  }
+
+  private renderWrappedCommandOutput(value: string, code?: number | string): string {
+    const body = this.truncateOutput(value || "(no output)");
+    if (code === undefined || code === 0 || code === "0") {
+      return body;
+    }
+    return this.truncateOutput(`Code: ${String(code)}\n\n${value || "(no output)"}`);
   }
 
   private renderFencedBlock(language: string, value: string): string {
