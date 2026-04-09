@@ -77,7 +77,11 @@ mkdir -p "${CONFIG_DIR}"
 if [[ ! -f "${ENV_PATH}" ]]; then
   cp "${ENV_TEMPLATE}" "${ENV_PATH}"
   # Expand $HOME in the env file
-  sed -i "s|\$HOME|${USER_HOME}|g" "${ENV_PATH}"
+  if sed --version >/dev/null 2>&1; then
+    sed -i "s|\$HOME|${USER_HOME}|g" "${ENV_PATH}"
+  else
+    sed -i '' "s|\$HOME|${USER_HOME}|g" "${ENV_PATH}"
+  fi
   echo ">>> created ${ENV_PATH} — fill in Feishu credentials before starting."
 else
   echo ">>> preserved existing ${ENV_PATH}"
