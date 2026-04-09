@@ -125,6 +125,7 @@ if [[ "${IS_MACOS}" == "true" ]]; then
   sed \
     -e "s|@ENV_PATH@|${ENV_PATH}|g" \
     -e "s|@BIN_PATH@|${BIN_PATH}|g" \
+    -e "s|@PATH@|${PATH_VALUE}|g" \
     "${START_SH_TEMPLATE}" > "${START_SH_PATH}"
   chmod +x "${START_SH_PATH}"
   echo ">>> created ${START_SH_PATH}"

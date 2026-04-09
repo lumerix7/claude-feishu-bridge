@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="@PATH@"
 set -a
 source @ENV_PATH@
 set +a
