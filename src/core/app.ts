@@ -1967,27 +1967,34 @@ export class App {
   // ---- Helpers ----
 
   private titleForCommand(commandName: string | undefined, text: string): string {
-    const maxLen = this.config.feishu.titleMaxLength;
     if (!commandName) {
-      const preview = text.replace(/\s+/g, " ").trim() || "Claude";
-      const prefix = "Claude | \ud83e\udd16 ";
-      if (prefix.length >= maxLen) return "Claude";
-      return `${prefix}${preview.slice(0, maxLen - prefix.length)}`;
+      return this.composeTitle("Claude", "\ud83e\udd16", text || "Claude");
     }
-    // Shell passthrough commands: show "cmd args..." truncated to maxLen
-    if (this.resolveLocalProjectCommand(commandName)) {
-      const full = text.replace(/\s+/g, " ").trim();
-      return full.length > maxLen ? full.slice(0, maxLen - 3) + "..." : full;
-    }
-    // Bridge commands: "Base | emoji /command args"
-    const base = COMMAND_BASE_TITLES[commandName] || commandName;
+    const base = this.resolveLocalProjectCommand(commandName)
+      ? commandName
+      : (COMMAND_BASE_TITLES[commandName] || commandName);
     const emoji = this.commandTitleEmoji(commandName);
+    return this.composeTitle(base, emoji, text || `/${commandName}`);
+  }
+
+  private composeTitle(base: string, emoji: string | undefined, detail: string): string {
+    const maxLen = this.config.feishu.titleMaxLength;
     const prefix = `${base} | ${emoji ? `${emoji} ` : ""}`;
-    if (prefix.length >= maxLen) return base.slice(0, maxLen);
-    return `${prefix}${text.slice(0, maxLen - prefix.length)}`;
+    if (prefix.length >= maxLen) {
+      return this.shortenTitleInput(`${prefix}${detail}`, maxLen);
+    }
+    return `${prefix}${this.shortenTitleInput(detail, maxLen - prefix.length)}`;
+  }
+
+  private shortenTitleInput(input: string, maxLength = this.config.feishu.titleMaxLength): string {
+    const normalized = input.replace(/\s+/g, " ").trim();
+    if (normalized.length <= maxLength) return normalized;
+    const edge = Math.max(8, Math.floor((maxLength - 3) / 2));
+    return `${normalized.slice(0, edge)}...${normalized.slice(-edge)}`;
   }
 
   private commandTitleEmoji(commandName: string): string | undefined {
+    if (this.resolveLocalProjectCommand(commandName)) return "\ud83d\udcc2";
     switch (commandName) {
       case "help": return "\u2753";
       case "status": return "\ud83d\udcca";
