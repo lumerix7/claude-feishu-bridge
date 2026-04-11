@@ -30,7 +30,8 @@
 
 - Typecheck only: `npm run check`
 - Build: `npm run build`
-- No dedicated automated test suite exists in this repo right now.
+- Tests: `npm test`
+- Gateway-focused tests: `npm test -- --test-name-pattern='splitMessageText|buildStreamingLineFrames|renderOutgoingBody'`
 - Practical verification path:
   - `systemctl --user status claude-feishu-bridge`
   - `journalctl --user -u claude-feishu-bridge -f`
@@ -51,6 +52,7 @@
 - Keep the bridge thin. Claude native sessions are the authority; the bridge should not duplicate state beyond bindings and transport metadata.
 - Prefer fixing behavior in the app layer or gateway once, not by adding command-specific rendering hacks in multiple places.
 - Preserve the streaming-first Feishu behavior. Rich card updates and pagination are part of the intended UX.
+- Large fenced output can still render differently across Feishu desktop and mobile clients; keep the gateway line-safe and keep the caveat documented in [`docs/feishu-rendering-caveats.md`](./docs/feishu-rendering-caveats.md).
 - Keep shell passthrough commands constrained to the bound project and allowed roots model.
 - Keep wrapped command handling centralized: usage/validation issues stay warning/orange, and executed wrapped commands return one raw output shape with merged stdout/stderr plus a leading `Code: ...` line; non-zero exits render red.
 - Useful runtime checks:

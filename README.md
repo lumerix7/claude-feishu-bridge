@@ -2,6 +2,8 @@
 
 Feishu-native control surface for Claude Code sessions. A daemon that exposes Claude Code to Feishu (Lark) chats via WebSocket: users type slash commands or plain prompts; the bridge routes them to Claude via the Claude Agent SDK and streams rich card replies back.
 
+Large fenced output can still render a bit differently across Feishu desktop and mobile clients. Keep pagination line-safe and see [`docs/feishu-rendering-caveats.md`](./docs/feishu-rendering-caveats.md) before changing gateway chunking.
+
 ## Quick start
 
 ```bash
