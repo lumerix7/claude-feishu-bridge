@@ -27,6 +27,7 @@ export interface ClaudeRunHandle {
 export interface ClaudeRunHooks {
   onStatus?: (text: string) => Promise<void> | void;
   onUpdate?: (update: string) => Promise<void> | void;
+  onInit?: (sessionId: string, model: string) => void;
 }
 
 export interface ClaudeTurnOptions {
@@ -63,6 +64,8 @@ export interface ClaudeBackend {
   getRecentSessionMessages(sessionId: string, limit: number): Promise<RecentSessionMessage[]>;
   renameSession(sessionId: string, title: string): Promise<void>;
   getVersion(): Promise<string | undefined>;
+  /** Returns the actual model used in the session by reading the session transcript. */
+  getSessionModel(sessionId: string): Promise<string | undefined>;
   /** Returns the last rate-limit utilization snapshot seen during any run, or undefined if none yet. */
   getRateLimitInfo(): RateLimitSnapshot | undefined;
 }

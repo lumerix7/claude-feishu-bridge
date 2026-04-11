@@ -102,8 +102,6 @@ Config cascades: **env vars** → **JSON config** (`BRIDGE_CONFIG_JSON`, default
 | Key | Default | Description |
 |-----|---------|-------------|
 | `claudeBin` | `"claude"` | Path to Claude Code binary |
-| `defaultModel` | `""` | Bridge-level model fallback (see priority below) |
-| `defaultEffortLevel` | `""` | Bridge-level effort fallback |
 | `permissionMode` | `"bypassPermissions"` | Default Claude permission mode |
 | `maxBudgetUsd` | `5` | Per-run budget cap (USD) |
 | `runTimeoutMs` | `600000` | Run timeout (ms) |
@@ -114,9 +112,16 @@ Config cascades: **env vars** → **JSON config** (`BRIDGE_CONFIG_JSON`, default
 
 Highest to lowest:
 
-1. `/model` command — in-memory per conversation, reset on bridge restart
-2. `~/.claude/settings.json` — native Claude Code config (`model`, `effortLevel` fields)
-3. Bridge config — `claude.defaultModel` / `claude.defaultEffortLevel`
+**Model:**
+1. `/model <name>` — in-memory per conversation, reset on bridge restart; only accepted if name matches a known model alias or ID
+2. `~/.claude/settings.json` `model` field — native Claude Code config
+3. Session `init.model` — actual model reported by the SDK at session start; populated on boot for existing sessions, updated on each new turn
+
+**Effort:**
+1. `/model --effort <level>` — in-memory per conversation, reset on bridge restart; only accepted for `low | medium | high | max`
+2. `~/.claude/settings.json` `effortLevel` field — native Claude Code config
+
+The SDK init event does not expose effort level, so there is no session fallback for effort. Both model and effort are resolved via the same `resolveModelOptions` path used by the SDK call, footer, `/status`, and `/model`.
 
 ### Project paths
 
@@ -124,7 +129,7 @@ All project paths must fall under `project.allowedRoots` (default: `[$HOME]`). `
 
 ## Architecture
 
-Each Feishu conversation (p2p, group, thread) maps to a stable **conversation key** bound to a `SessionBinding` persisted in `storePath` (default `~/.local/share/claude-feishu-bridge/bindings.json`). The binding stores `claudeSessionId`, `project`, and `permissionMode`. Model/effort overrides are in-memory only.
+Each Feishu conversation (p2p, group, thread) maps to a stable **conversation key** bound to a `SessionBinding` persisted in `storePath` (default `~/.local/share/claude-feishu-bridge/bindings.json`). The binding stores `claudeSessionId`, `project`, and `permissionMode`. Model/effort overrides are in-memory only; session `init.model` is cached in-memory at boot and on each turn.
 
 ### Message flow
 

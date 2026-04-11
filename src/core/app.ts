@@ -51,6 +51,7 @@ type LocalProjectCommand = {
 
 type SessionFooterState = {
   sessionTitle?: string;
+  model?: string;
 };
 
 class ArgCursor {
@@ -98,7 +99,6 @@ export class App {
       configPath: this.config.configPath,
       projectAllowedRoots: this.config.project.allowedRoots,
       defaultProject: this.config.project.defaultProject,
-      defaultModel: this.config.claude.defaultModel || "(default)"
     });
     this.feishu = new FeishuGateway(this.config.feishu);
     await this.feishu.start(
@@ -401,7 +401,7 @@ export class App {
     const [version, project, modelOpts] = await Promise.all([
       this.claude.getVersion(),
       this.effectiveProject(binding),
-      this.resolveModelOptions(key),
+      this.resolveModelOptions(key, binding?.claudeSessionId),
     ]);
 
     const lines: string[] = [
@@ -659,7 +659,7 @@ export class App {
       if (!cursor.isEmpty()) {
         return this.renderCommandError("Model", `unexpected argument: ${cursor.peek()!}`, "/model list");
       }
-      const { model: currentModel } = await this.resolveModelOptions(key);
+      const { model: currentModel } = await this.resolveModelOptions(key, binding?.claudeSessionId);
       const header = "| # | Model | Reasoning | Input | Personality | Default | Upgrade | Notes |";
       const sep    = "|---|-------|-----------|-------|-------------|---------|---------|-------|";
       const rows = App.KNOWN_MODELS.map((m, i) => {
@@ -702,20 +702,25 @@ export class App {
 
     // No args → show current resolved values
     if (!modelName && !effort) {
-      const opts = await this.resolveModelOptions(key);
+      const opts = await this.resolveModelOptions(key, binding?.claudeSessionId);
       return `**Model**: ${opts.model || "(default)"}\n**Effort**: ${opts.effort || "(default)"}`;
     }
 
     // Apply changes — kept in memory only, not persisted to bindings store
     const lines: string[] = [];
     const existing = this.modelOverrides.get(key) || {};
-    this.modelOverrides.set(key, {
-      ...existing,
-      ...(modelName ? { model: modelName } : {}),
-      ...(effort ? { effort } : {}),
-    });
-    if (modelName) lines.push(`Model set to: **${modelName}**`);
-    if (effort) lines.push(`Effort set to: **${effort}**`);
+    if (modelName) {
+      const known = App.KNOWN_MODELS.find((m) => m.alias === modelName || m.model === modelName);
+      if (!known) {
+        return this.renderCommandError("Model", `unknown model: ${modelName}`, "use /model list to see available models");
+      }
+      this.modelOverrides.set(key, { ...existing, model: known.model });
+      lines.push(`Model set to: **${known.model}**`);
+    }
+    if (effort) {
+      this.modelOverrides.set(key, { ...(this.modelOverrides.get(key) || existing), effort });
+      lines.push(`Effort set to: **${effort}**`);
+    }
     return lines.join("\n");
   }
 
@@ -1841,7 +1846,7 @@ export class App {
       return { text: `Project path not allowed: ${project}`, severity: "error" };
     }
 
-    const { model: resolvedModel, effort: resolvedEffort } = await this.resolveModelOptions(key);
+    const { model: resolvedModel, effort: resolvedEffort } = await this.resolveModelOptions(key, sessionId);
     const turnOptions: ClaudeTurnOptions = {
       model: resolvedModel,
       permissionMode: binding?.permissionMode || undefined,
@@ -1856,7 +1861,8 @@ export class App {
         turnOptions,
         {
           onStatus: (status) => onStatus?.(status),
-          onUpdate: (update) => onUpdate?.(update)
+          onUpdate: (update) => onUpdate?.(update),
+          onInit: (sid, model) => this.rememberSessionModel(sid, model),
         }
       );
 
@@ -1983,23 +1989,23 @@ export class App {
   }
 
   // Resolve effective model and effort for a conversation.
-  // Priority: in-memory Feishu override → ~/.claude/settings.json → bridge config default
-  private async resolveModelOptions(key: string): Promise<{ model?: string; effort?: string }> {
+  // Priority: /model override → ~/.claude/settings.json → session init.model
+  private async resolveModelOptions(key: string, sessionId?: string): Promise<{ model?: string; effort?: string }> {
     const override = this.modelOverrides.get(key);
     const cs = await this.readClaudeSettings();
+    const sessionState = sessionId ? this.latestSessionTitleState.get(sessionId) : undefined;
     return {
-      model: override?.model || cs.model || this.config.claude.defaultModel || undefined,
-      effort: override?.effort || cs.effortLevel || this.config.claude.defaultEffortLevel || undefined,
+      model: override?.model || cs.model || sessionState?.model,
+      effort: override?.effort || cs.effortLevel || undefined,
     };
   }
 
   private async buildFooter(key: string, binding: SessionBinding | undefined): Promise<string> {
     const ts = formatIsoTimestamp(new Date());
-    const { model, effort } = await this.resolveModelOptions(key);
-    const project = await this.effectiveProject(binding);
     const sessionId = binding?.claudeSessionId;
+    const { model, effort } = await this.resolveModelOptions(key, sessionId);
+    const project = await this.effectiveProject(binding);
     const sessionState = sessionId ? this.latestSessionTitleState.get(sessionId) : undefined;
-
     const modelPart = [model, effort].filter(Boolean).join(" ");
     const sessionTitle = sessionState?.sessionTitle
       ? escapeMarkdownInline(this.truncateMiddle(sessionState.sessionTitle, this.config.feishu.footerSessionTitleMaxLength))
@@ -2012,6 +2018,12 @@ export class App {
     if (!title) return;
     const existing = this.latestSessionTitleState.get(sessionId) || {};
     this.latestSessionTitleState.set(sessionId, { ...existing, sessionTitle: title });
+  }
+
+  private rememberSessionModel(sessionId: string, model: string | undefined): void {
+    if (!model) return;
+    const existing = this.latestSessionTitleState.get(sessionId) || {};
+    this.latestSessionTitleState.set(sessionId, { ...existing, model });
   }
 
   private truncateMiddle(value: string, maxLength: number): string {
@@ -2087,8 +2099,12 @@ export class App {
       startupKey ? this.store.get(startupKey) : Promise.resolve(undefined)
     ]);
     if (binding?.claudeSessionId) {
-      const info = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
+      const [info, sessionModel] = await Promise.all([
+        this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined),
+        this.claude.getSessionModel(binding.claudeSessionId).catch(() => undefined),
+      ]);
       this.rememberSessionTitle(binding.claudeSessionId, info?.customTitle || info?.summary);
+      this.rememberSessionModel(binding.claudeSessionId, sessionModel);
     }
     const project = await this.effectiveProject(binding);
     const footer = await this.buildFooter(startupKey || "", binding);

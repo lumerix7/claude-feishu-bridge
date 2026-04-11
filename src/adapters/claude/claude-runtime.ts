@@ -126,9 +126,7 @@ export class SdkClaudeBackend implements ClaudeBackend {
         cwd: project,
         ...(permMode ? { permissionMode: permMode } : {}),
         allowDangerouslySkipPermissions: permMode === "bypassPermissions",
-        ...(options?.model || this.config.claude.defaultModel
-          ? { model: options?.model || this.config.claude.defaultModel }
-          : {}),
+        ...(options?.model ? { model: options.model } : {}),
         ...(maxBudget > 0 ? { maxBudgetUsd: maxBudget } : {}),
         ...(options?.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
         ...(options?.effort ? { effort: options.effort as EffortLevel } : {}),
@@ -211,7 +209,8 @@ export class SdkClaudeBackend implements ClaudeBackend {
             const init = msg as SDKSystemMessage;
             resolvedSessionId = init.session_id;
             resolvedCwd = init.cwd;
-            hooks?.onStatus?.(`session: ${init.session_id}, model: ${init.model}`);
+            hooks?.onInit?.(init.session_id, init.model);
+            hooks?.onStatus?.("Handing off to Claude Code...");
             continue;
           }
 
@@ -617,6 +616,18 @@ export class SdkClaudeBackend implements ClaudeBackend {
 
   async renameSession(sessionId: string, title: string): Promise<void> {
     await sdkRenameSession(sessionId, title);
+  }
+
+  async getSessionModel(sessionId: string): Promise<string | undefined> {
+    try {
+      const messages = await sdkGetSessionMessages(sessionId, { includeSystemMessages: false });
+      for (const m of messages) {
+        if (m.type !== "assistant") continue;
+        const model = (m.message as { model?: string }).model;
+        if (model && model !== "<synthetic>") return model;
+      }
+    } catch {}
+    return undefined;
   }
 
   getRateLimitInfo(): RateLimitSnapshot | undefined {
