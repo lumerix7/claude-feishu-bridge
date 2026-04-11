@@ -264,7 +264,7 @@ export class App {
     const command = parsedCommand;
 
     if (command?.name === "help") return this.handleHelp(new ArgCursor(command.args));
-    if (command?.name === "status") return this.handleStatus(message, new ArgCursor(command.args));
+    if (command?.name === "status") return this.handleStatus(message, new ArgCursor(command.args), onStatus);
     if (command?.name === "new") return this.handleNew(message, new ArgCursor(command.args));
     if (command?.name === "stop") return this.handleStop(message);
     if (command?.name === "model") return this.handleModel(message, new ArgCursor(command.args));
@@ -366,7 +366,34 @@ export class App {
   }
 
 
-  private async handleStatus(message: IncomingMessage, cursor: ArgCursor): Promise<string> {
+  private async handleStatus(
+    message: IncomingMessage,
+    cursor: ArgCursor,
+    onStatus?: (text: string | AppResponse) => Promise<void>
+  ): Promise<string | AppResponse> {
+    const checkUpdate = cursor.takeFlag("check-update", "--check-update");
+    const help = cursor.takeFlag("-h", "--help");
+
+    if (help) {
+      return [
+        "Show current session and bridge state.",
+        "",
+        "## Usage",
+        "",
+        "- `/status` — show current state",
+        "- `/status check-update` — also check npm registry for dependency updates",
+        "- `/status -h|--help` — show this help"
+      ].join("\n");
+    }
+
+    if (!cursor.isEmpty()) {
+      return this.renderCommandError("Status", `unsupported argument \`${cursor.peek()}\``, "`/status [check-update] [-h|--help]`");
+    }
+
+    if (checkUpdate) {
+      await onStatus?.("Collecting status and checking npm registry for Claude SDK and dependencies...");
+    }
+
     const key = conversationKeyFor(message);
     const binding = await this.store.get(key);
     const activeRun = this.activeRuns.get(key);
@@ -406,7 +433,127 @@ export class App {
       lines.push(`**Usage${type}**: ${pct} used${resets} *(seen ${ageStr})*`);
     }
 
-    return lines.join("\n");
+    if (!checkUpdate) return lines.join("\n");
+
+    // --- check-update section ---
+    const packages: Array<{ label: string; name: string }> = [
+      { label: "Claude SDK", name: "@anthropic-ai/claude-agent-sdk" },
+      { label: "Feishu", name: "@larksuiteoapi/node-sdk" },
+      { label: "dotenv", name: "dotenv" },
+    ];
+
+    const [claudeCodeInstalled, claudeCodeLatest, declaredRanges, depResults] = await Promise.all([
+      this.readGlobalNpmPackageVersion("@anthropic-ai/claude-code"),
+      this.readLatestNpmPackageVersion("@anthropic-ai/claude-code"),
+      this.readAllDeclaredPackageRanges(),
+      Promise.all(
+        packages.map(async (pkg) => {
+          const [installed, latest] = await Promise.all([
+            this.readInstalledPackageVersion(pkg.name),
+            this.readLatestNpmPackageVersion(pkg.name),
+          ]);
+          return { ...pkg, installed, latest, status: this.describeUpdateStatus(installed, latest) };
+        })
+      ),
+    ]);
+
+    const claudeCodeStatus = this.describeUpdateStatus(claudeCodeInstalled, claudeCodeLatest);
+    const sections: string[] = [
+      "## Claude Code",
+      "",
+      `- **Status**: ${this.formatUpdateStatusBadge(claudeCodeStatus)}`,
+      `- **Package**: \`@anthropic-ai/claude-code\``,
+      `- **Installed**: \`${claudeCodeInstalled || "(unknown)"}\``,
+      `- **Latest**: \`${claudeCodeLatest || "(unavailable)"}\``,
+      "",
+      "## Dependencies",
+      "",
+    ];
+    for (const r of depResults) {
+      const declared = declaredRanges[r.name];
+      sections.push(`### ${r.label}`, "");
+      sections.push(`- **Status**: ${this.formatUpdateStatusBadge(r.status)}`);
+      sections.push(`- **Package**: \`${r.name}\``);
+      if (declared) sections.push(`- **Declared**: \`${declared}\``);
+      sections.push(`- **Installed**: \`${r.installed || "(unknown)"}\``);
+      sections.push(`- **Latest**: \`${r.latest || "(unavailable)"}\``);
+      sections.push("");
+    }
+
+    const text = sections.join("\n").trimEnd();
+    const hasUpdate =
+      claudeCodeStatus === "update available" || depResults.some((r) => r.status === "update available");
+    return hasUpdate ? { text, severity: "warning" } : text;
+  }
+
+  private async readInstalledPackageVersion(packageName: string): Promise<string | undefined> {
+    const packagePath = new URL(`../../node_modules/${packageName}/package.json`, import.meta.url);
+    const raw = await readFile(packagePath, "utf8").catch(() => "");
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw) as { version?: string };
+      return typeof parsed.version === "string" ? parsed.version : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readAllDeclaredPackageRanges(): Promise<Record<string, string>> {
+    const packagePath = new URL("../../package.json", import.meta.url);
+    const raw = await readFile(packagePath, "utf8").catch(() => "");
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+      return { ...parsed.devDependencies, ...parsed.dependencies };
+    } catch {
+      return {};
+    }
+  }
+
+  private async readGlobalNpmPackageVersion(packageName: string): Promise<string | undefined> {
+    try {
+      const { stdout } = await execFileAsync("npm", ["list", "-g", "--json", "--depth=0"], {
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+      });
+      const parsed = JSON.parse(stdout.trim()) as { dependencies?: Record<string, { version?: string }> };
+      return parsed.dependencies?.[packageName]?.version;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readLatestNpmPackageVersion(packageName: string): Promise<string | undefined> {
+    try {
+      const { stdout } = await execFileAsync("npm", ["view", packageName, "version", "--json"], {
+        timeout: 15_000,
+        maxBuffer: 512 * 1024,
+      });
+      const trimmed = stdout.trim();
+      if (!trimmed) return undefined;
+      const parsed = JSON.parse(trimmed) as string;
+      return typeof parsed === "string" ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private describeUpdateStatus(currentVersion?: string, latestVersion?: string): string {
+    if (!latestVersion) return "latest unavailable";
+    if (!currentVersion) return "current unknown";
+    return this.normalizeVersion(currentVersion) === this.normalizeVersion(latestVersion)
+      ? "up to date"
+      : "update available";
+  }
+
+  private formatUpdateStatusBadge(status: string): string {
+    if (status === "up to date") return `\`${status}\``;
+    if (status === "update available") return `⬆️ **${status}**`;
+    return `**${status}**`;
+  }
+
+  private normalizeVersion(value: string): string {
+    return value.trim().replace(/^v/i, "");
   }
 
   private newHelpText(): string {
