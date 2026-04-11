@@ -165,7 +165,7 @@ test("resume last alias replays recent messages with timestamps", async () => {
       }
     });
 
-    const updates: string[] = [];
+    const updates: Array<string | { text: string; bodyFormat?: string }> = [];
     const result = await app.handleIncoming(
       makeMessage("/resume -"),
       undefined,
@@ -177,14 +177,14 @@ test("resume last alias replays recent messages with timestamps", async () => {
     const text = typeof result === "string" ? result : result.text;
     assert.match(text, /- \*\*Session\*\*: `session-1`/);
     assert.equal(updates.length, 2);
-    assert.equal(
-      updates[0],
-      "````text\n[Claude] 2026-04-09T20:27:10.194+08:00\n\nfirst line\n```inside```\n````"
-    );
-    assert.equal(
-      updates[1],
-      "```text\n[User] 2026-04-09T20:27:32.000+08:00\n\nfollow up\n```"
-    );
+    assert.deepEqual(updates[0], {
+      text: "[Claude] 2026-04-09T20:27:10.194+08:00\n\nfirst line\n```inside```",
+      bodyFormat: "raw-text"
+    });
+    assert.deepEqual(updates[1], {
+      text: "[User] 2026-04-09T20:27:32.000+08:00\n\nfollow up",
+      bodyFormat: "raw-text"
+    });
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
@@ -223,7 +223,7 @@ test("resume replays recent messages even when rebinding the same session", asyn
       updatedAt: "2026-04-09T12:27:00.000Z"
     });
 
-    const updates: string[] = [];
+    const updates: Array<string | { text: string; bodyFormat?: string }> = [];
     await app.handleIncoming(
       makeMessage("/resume session-1"),
       undefined,
@@ -233,10 +233,10 @@ test("resume replays recent messages even when rebinding the same session", asyn
     );
 
     assert.equal(updates.length, 1);
-    assert.equal(
-      updates[0],
-      "```text\n[Claude] 2026-04-09T20:27:10.194+08:00\n\nstill replay\n```"
-    );
+    assert.deepEqual(updates[0], {
+      text: "[Claude] 2026-04-09T20:27:10.194+08:00\n\nstill replay",
+      bodyFormat: "raw-text"
+    });
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

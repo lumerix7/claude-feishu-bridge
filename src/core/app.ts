@@ -112,19 +112,22 @@ export class App {
           let streamDrain = Promise.resolve();
           const streamKey = `${message.chatId}:${message.threadId || "root"}:${message.messageId}:${commandName || "claude"}`;
 
-          const sendStatusSafely = async (update: string): Promise<void> => {
+          const sendStatusSafely = async (update: string | AppResponse): Promise<void> => {
             statusChain = statusChain.then(async () => {
               try {
                 const latestBinding = (await this.store.get(conversationKeyFor(message))) || currentBinding;
+                const updateText = typeof update === "string" ? update : update.text;
+                const updateBodyFormat = typeof update === "string" ? undefined : update.bodyFormat;
                 await this.feishu?.send({
                   chatId: message.chatId,
                   title: messageTitle,
                   template: messageTemplate,
                   footer: await this.buildFooter(msgKey, latestBinding),
-                  text: update,
+                  text: updateText,
                   replyToMessageId: message.messageId,
                   threadId: message.threadId,
-                  streaming: false
+                  streaming: false,
+                  bodyFormat: updateBodyFormat
                 });
               } catch (error) {
                 console.error("failed to send Feishu update", { messageId: message.messageId, error });
@@ -237,7 +240,7 @@ export class App {
   async handleIncoming(
     message: IncomingMessage,
     onUpdate?: (update: string) => Promise<void>,
-    onStatus?: (text: string) => Promise<void>
+    onStatus?: (text: string | AppResponse) => Promise<void>
   ): Promise<string | AppResponse> {
     if (message.chatType !== "p2p") {
       return "Only direct messages are supported right now.";
@@ -257,7 +260,16 @@ export class App {
     if (command?.name === "permission") return this.handlePermission(message, new ArgCursor(command.args));
     if (command?.name === "project") return this.handleProject(message, new ArgCursor(command.args));
     if (command?.name === "session") return this.handleSession(message, new ArgCursor(command.args));
-    if (command?.name === "resume") return this.handleResume(message, new ArgCursor(command.args), onStatus || onUpdate);
+    if (command?.name === "resume") {
+      const replayStatusSink = onStatus || (onUpdate
+        ? async (text: string | AppResponse) => {
+            if (typeof text === "string") {
+              await onUpdate(text);
+            }
+          }
+        : undefined);
+      return this.handleResume(message, new ArgCursor(command.args), replayStatusSink);
+    }
     if (command?.name === "rename") return this.handleRename(message, new ArgCursor(command.args));
 
     // File system commands
@@ -1026,7 +1038,7 @@ export class App {
   private async handleResume(
     message: IncomingMessage,
     cursor: ArgCursor,
-    onStatus?: (text: string) => Promise<void>
+    onStatus?: (text: string | AppResponse) => Promise<void>
   ): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
 
@@ -1283,7 +1295,7 @@ export class App {
     message: IncomingMessage,
     command: string,
     args: string[],
-    onStatus?: (text: string) => Promise<void>
+    onStatus?: (text: string | AppResponse) => Promise<void>
   ): Promise<string | AppResponse> {
     const binding = await this.store.get(conversationKeyFor(message));
     const project = await this.effectiveProject(binding);
@@ -1435,17 +1447,20 @@ export class App {
   private async renderRecentSessionReplayMessages(
     sessionId: string,
     limit: number
-  ): Promise<string[]> {
+  ): Promise<AppResponse[]> {
     const messages = await this.claude.getRecentSessionMessages(sessionId, limit).catch(() => []);
     return messages.map((message) => this.renderRecentSessionReplayMessage(message));
   }
 
   private renderRecentSessionReplayMessage(
     message: { role: "user" | "assistant"; text: string; timestamp?: string }
-  ): string {
+  ): AppResponse {
     const role = message.role === "assistant" ? "[Claude]" : "[User]";
     const prefix = message.timestamp ? `${role} ${this.formatLocalIsoTimestamp(message.timestamp)}` : role;
-    return this.renderFencedBlock("text", `${prefix}\n\n${message.text}`);
+    return {
+      text: `${prefix}\n\n${message.text}`,
+      bodyFormat: "raw-text"
+    };
   }
 
   private formatLocalIsoTimestamp(value: string | Date): string {
@@ -1479,7 +1494,7 @@ export class App {
   private async handleClaudeTurn(
     message: IncomingMessage,
     onUpdate?: (update: string) => Promise<void>,
-    onStatus?: (text: string) => Promise<void>
+    onStatus?: (text: string | AppResponse) => Promise<void>
   ): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
 
