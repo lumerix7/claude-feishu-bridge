@@ -48,7 +48,9 @@ export class BindingStore {
           .map((item) => ({
             conversationKey: item.conversationKey,
             claudeSessionId: item.claudeSessionId,
+            lastClaudeSessionId: item.lastClaudeSessionId,
             project: item.project,
+            lastProject: item.lastProject,
             permissionMode: item.permissionMode,
             createdAt: item.createdAt || new Date(0).toISOString(),
             updatedAt: item.updatedAt || item.createdAt || new Date(0).toISOString()

@@ -300,10 +300,11 @@ export class App {
   // ---- Helpers ----
 
   private renderCommandError(_title: string, error: string, usage?: string, extraLines: string[] = [], severity: AppResponse["severity"] = "warning"): AppResponse {
+    const label = severity === "warning" ? "Warning" : "Error";
     return {
       severity,
       text: [
-        `- **Error**: ${error}`,
+        `- **${label}**: ${error}`,
         ...(usage ? [`- **Usage**: ${usage}`] : []),
         ...extraLines
       ].join("\n")
@@ -1224,6 +1225,7 @@ export class App {
       return [header, divider, ...rows].join("\n");
     }
 
+    const existing = await this.store.get(key);
     let sessionId: string | undefined;
     let wantsLast = false;
 
@@ -1253,39 +1255,37 @@ export class App {
       };
     }
 
-    if (indexArg !== undefined || wantsLast) {
-      const binding = await this.store.get(key);
-      const currentProject = await this.effectiveProject(binding);
+    if (wantsLast) {
+      if (!existing?.lastClaudeSessionId) {
+        return this.renderCommandError(
+          "Resume",
+          "no last session is saved for this conversation",
+          "`/resume <session-id>` or `/resume list`",
+          ["- **Note**: Resume one session explicitly first; successful session switches save the previous session for `/resume -`."]
+        );
+      }
+      sessionId = existing.lastClaudeSessionId;
+    } else if (indexArg !== undefined) {
+      const currentProject = await this.effectiveProject(existing);
       const projectDir = projectArg || (allProjects ? undefined : currentProject);
       const sessions = await this.claude.listSessions(projectDir, 20);
       if (sessions.length === 0) {
         return this.renderCommandError("Resume", "no sessions found in current scope", "`/resume list [--all]`");
       }
-      const currentSessionIdForSort = binding?.claudeSessionId;
+      const index = Number(indexArg);
+      if (!Number.isInteger(index) || index < 1) {
+        return this.renderCommandError("Resume", "invalid index — must be a positive integer", "`/resume -n <index>`");
+      }
       sessions.sort((a, b) => {
-        const aCur = a.sessionId === currentSessionIdForSort ? 0 : 1;
-        const bCur = b.sessionId === currentSessionIdForSort ? 0 : 1;
-        if (aCur !== bCur) return aCur - bCur;
-        const aProj = a.cwd || "";
-        const bProj = b.cwd || "";
-        if (aProj !== bProj) return aProj.localeCompare(bProj);
         const aTime = a.lastModified ? new Date(a.lastModified).getTime() : 0;
         const bTime = b.lastModified ? new Date(b.lastModified).getTime() : 0;
         return bTime - aTime;
       });
-      if (wantsLast) {
-        sessionId = sessions[0]?.sessionId;
-      } else {
-        const index = Number(indexArg);
-        if (!indexArg || !Number.isInteger(index) || index < 1) {
-          return this.renderCommandError("Resume", "invalid index — must be a positive integer", "`/resume -n <index>`");
-        }
-        const selected = sessions[index - 1];
-        if (!selected) {
-          return this.renderCommandError("Resume", `index ${index} out of range (1–${sessions.length})`, "`/resume list`");
-        }
-        sessionId = selected.sessionId;
+      const selected = sessions[index - 1];
+      if (!selected) {
+        return this.renderCommandError("Resume", `index ${index} out of range (1–${sessions.length})`, "`/resume list`");
       }
+      sessionId = selected.sessionId;
     } else {
       sessionId = cursor.remainingText() || undefined;
     }
@@ -1307,7 +1307,6 @@ export class App {
       return this.renderCommandError("Resume", "no session specified", "`/resume [<session-id>|-|--last|-n <index>|list]`");
     }
 
-    const binding = await this.store.get(key);
     const now = new Date().toISOString();
 
     // Validate session exists, then resolve project
@@ -1327,15 +1326,22 @@ export class App {
       resolvedProject = this.resolveProject(cdArg);
     } else if (sessionCwd && this.isAllowedProject(sessionCwd)) {
       resolvedProject = sessionCwd;
+    } else if (wantsLast && existing?.lastProject && this.isAllowedProject(existing.lastProject)) {
+      resolvedProject = existing.lastProject;
     } else {
-      resolvedProject = await this.effectiveProject(binding);
+      resolvedProject = await this.effectiveProject(existing);
     }
 
-    if (binding) {
-      binding.claudeSessionId = sessionId;
-      binding.project = resolvedProject;
-      binding.updatedAt = now;
-      await this.store.put(binding);
+    const switchingSession = Boolean(existing?.claudeSessionId) && existing?.claudeSessionId !== sessionId;
+    const lastClaudeSessionId = switchingSession ? existing?.claudeSessionId : existing?.lastClaudeSessionId;
+    const lastProject = switchingSession ? existing?.project : existing?.lastProject;
+    if (existing) {
+      existing.claudeSessionId = sessionId;
+      existing.lastClaudeSessionId = lastClaudeSessionId;
+      existing.lastProject = lastProject;
+      existing.project = resolvedProject;
+      existing.updatedAt = now;
+      await this.store.put(existing);
     } else {
       await this.store.put({ conversationKey: key, claudeSessionId: sessionId, project: resolvedProject, createdAt: now, updatedAt: now });
     }

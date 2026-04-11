@@ -5,7 +5,9 @@ export type OutgoingBodyFormat = "raw-markdown" | "raw-text";
 export interface SessionBinding {
   conversationKey: FeishuConversationKey;
   claudeSessionId?: ClaudeSessionId;
+  lastClaudeSessionId?: ClaudeSessionId;
   project: string;
+  lastProject?: string;
   permissionMode?: string;
   createdAt: string;
   updatedAt: string;
