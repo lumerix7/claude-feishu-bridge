@@ -50,6 +50,7 @@
 - Be proactive: when a durable rule changes, update this file briefly; keep full operator detail in [`README.md`](./README.md) or other docs.
 - Prefer simple first, then one step more.
 - Keep the bridge thin. Claude native sessions are the authority; the bridge should not duplicate state beyond bindings and transport metadata.
+- Keep `/rename` native and aligned with sibling bridges; use `--session <session-id>` to target one session without rebinding.
 - Prefer fixing behavior in the app layer or gateway once, not by adding command-specific rendering hacks in multiple places.
 - Preserve the streaming-first Feishu behavior. Rich card updates and pagination are part of the intended UX.
 - Large fenced output can still render differently across Feishu desktop and mobile clients; keep the gateway line-safe and keep the caveat documented in [`docs/feishu-rendering-caveats.md`](./docs/feishu-rendering-caveats.md).

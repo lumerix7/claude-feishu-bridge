@@ -313,6 +313,16 @@ export class App {
     };
   }
 
+  private renderCommandWarning(warning: string, usage?: string): AppResponse {
+    return {
+      severity: "warning",
+      text: [
+        `- **Warning**: ${warning}`,
+        ...(usage ? [`- **Usage**: ${usage}`] : [])
+      ].join("\n")
+    };
+  }
+
   // ---- Command handlers ----
 
   private handleHelp(cursor: ArgCursor): string | AppResponse {
@@ -325,7 +335,7 @@ export class App {
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
       "- `/session [<session-id>|list [options]] [-h|--help]` inspect current session, inspect a specific session, or browse recent sessions",
       "- `/resume [<session-id>|-|--last|-n <index>|list] [--messages <count>] [-C <dir>] [-h|--help]` bind a previous session",
-      "- `/rename [<name>] [-h|--help]` show or set the current session title",
+        "- `/rename [--session <session-id>] ['name'|-- name] [-h|--help]` show or change a Claude session title",
       "- `/stop` stop the current active run",
       "",
       "## Claude",
@@ -834,69 +844,95 @@ export class App {
       "",
       "## Usage",
       "",
-      "- `/rename` — show the current session title",
-      "- `/rename <name>` — set a custom title for the current session",
-      "- `/rename <session-id> <name>` — set a custom title for a specific session",
-      "- `/rename -h|--help` — show this help",
+      "### `/rename` - Show the current bound session title.",
       "",
-      "## Options",
+      "### `/rename [options] ['name'|-- name]` - Show or change one session title.",
       "",
-      "- `-h, --help` show rename help",
+      "#### Options",
       "",
-      "## Notes",
+      "- `--session <session-id>` Target one explicit session id without rebinding.",
+      "- `'name'` Set the session title when shell-style parsing leaves one positional argument.",
+      "- `--` Stop option parsing; everything after it becomes the new title.",
       "",
-      "The title appears in `/session list` and in the Claude Code session history.",
-      "Session IDs can be found with `/session list`."
+      "### General",
+      "",
+      "- `-h, --help` Show rename help.",
+      "",
+      "## Examples",
+      "",
+      "- `/rename` - show the current bound session title",
+      "- `/rename 'Review changes'` - rename the current bound session title",
+      "- `/rename --session session-123 'Review changes'` - rename one explicit session without rebinding",
+      "- `/rename -- -h` - set the current bound session title to `-h`"
     ].join("\n");
   }
 
   private async handleRename(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
+    if (cursor.takeFlag("-h", "--help")) return this.renameHelpText();
 
-    const tok = cursor.peek();
-    if (tok === "-h" || tok === "--help") return this.renameHelpText();
-
-    const binding = await this.store.get(key);
-    if (!binding?.claudeSessionId) {
-      return "No active session. Send a message or use `/new` to start.";
+    const explicitSessionId = cursor.takeOption("--session");
+    if (explicitSessionId === "") {
+      return this.renderCommandError(
+        "Rename",
+        "missing value for `--session <session-id>`",
+        "`/rename [--session <session-id>] ['name'|-- name] [-h|--help]`"
+      );
     }
 
-    if (cursor.isEmpty()) {
-      // Show current title
-      const info = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
-      if (!info) return `**Session**: \`${binding.claudeSessionId}\`\n**Title**: (none)`;
-      const title = info.customTitle || info.summary || "(none)";
+    const binding = await this.store.get(key);
+    const sessionId = explicitSessionId || binding?.claudeSessionId;
+    if (!sessionId) {
+      return this.renderCommandWarning(
+        "No active session. Send a message or use `/new` to start, or pass `/rename --session <session-id>`."
+      );
+    }
+
+    let nextName: string | undefined;
+    if (cursor.peek() === "--") {
+      cursor.shift();
+      const literalName = cursor.remaining().join(" ").trim();
+      if (!literalName) {
+        return this.renderCommandError(
+          "Rename",
+          "missing rename text after `--`",
+          "`/rename [--session <session-id>] ['name'|-- name] [-h|--help]`"
+        );
+      }
+      nextName = literalName;
+    } else {
+      const positionalArgs = cursor.remaining();
+      if (positionalArgs.some((arg) => arg === "-h" || arg === "--help")) {
+        return this.renameHelpText();
+      }
+      if (positionalArgs.length > 1 || positionalArgs[0]?.startsWith("-")) {
+        const error = positionalArgs.length > 1
+          ? "multiple bare rename arguments require quotes or `--`"
+          : `unsupported rename option \`${positionalArgs[0]}\``;
+        return this.renderCommandError(
+          "Rename",
+          error,
+          "`/rename [--session <session-id>] ['name'|-- name] [-h|--help]`"
+        );
+      }
+      nextName = positionalArgs[0]?.trim() || undefined;
+    }
+
+    if (!nextName) {
+      const info = await this.claude.getSessionInfo(sessionId).catch(() => undefined);
+      const title = info?.customTitle || info?.summary || "(none)";
       return [
-        `**Session**: \`${binding.claudeSessionId}\``,
-        `**Title**: ${info.customTitle ? `_${info.customTitle}_` : title}`,
+        `- **Session**: \`${sessionId}\``,
+        `- **Title**: ${escapeMarkdownInline(title)}`
       ].join("\n");
     }
 
-    // Collect all remaining tokens as parts of the name (or session-id + name)
-    const args: string[] = [];
-    while (!cursor.isEmpty()) {
-      const t = cursor.shift();
-      if (t) args.push(t);
-    }
-
-    // Disambiguate: if first token looks like a UUID, treat as <session-id> <name>
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    let sessionId = binding.claudeSessionId;
-    let name: string;
-    if (args.length >= 2 && UUID_RE.test(args[0]!)) {
-      sessionId = args[0]!;
-      name = args.slice(1).join(" ").trim();
-    } else {
-      name = args.join(" ").trim();
-    }
-
-    if (!name) {
-      return this.renderCommandError("Rename", "missing title", "/rename <name>");
-    }
-
     try {
-      await this.claude.renameSession(sessionId, name);
-      return `Renamed \`${sessionId}\` → _${name}_`;
+      await this.claude.renameSession(sessionId, nextName);
+      return [
+        `- **Session**: \`${sessionId}\``,
+        `- **Title**: ${escapeMarkdownInline(nextName)}`
+      ].join("\n");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return this.renderCommandError("Rename", msg);
@@ -956,7 +992,7 @@ export class App {
       );
 
       const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
-      const header = "| # | Project | Updated | Session | Last message | Name | Summary | Flags |";
+      const header = "| # | Project | Updated | Session | Last message | Title | Summary | Flags |";
       const divider = "| --- | --- | --- | --- | --- | --- | --- | --- |";
       const rows = sessions.map((s, i) => {
         const isCurrent = s.sessionId === currentSessionId;
@@ -1174,7 +1210,7 @@ export class App {
         sessions.map((s) => this.claude.getLastUserMessage(s.sessionId).catch(() => undefined))
       );
       const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
-      const header = "| # | Project | Updated | Session | Last message | Name | Summary | Branch | Flags |";
+      const header = "| # | Project | Updated | Session | Last message | Title | Summary | Branch | Flags |";
       const divider = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |";
       const rows = sessions.map((s, i) => {
         const isCurrent = s.sessionId === currentSessionId;
@@ -1475,11 +1511,11 @@ export class App {
       ...(updatedAt ? [`- **Updated**: ${updatedAt}`] : []),
       ...(sessionInfo?.cwd ? [`- **Cwd**: \`${sessionInfo.cwd}\``] : []),
       ...(sessionInfo?.fileSize != null ? [`- **File size**: ${formatSize(sessionInfo.fileSize)}`] : []),
-      ...(sessionInfo?.customTitle ? [`- **Name**: ${sessionInfo.customTitle}`] : []),
+      ...(sessionInfo?.customTitle ? [`- **Title**: ${escapeMarkdownInline(sessionInfo.customTitle)}`] : []),
       ...(sessionInfo?.tag ? [`- **Tag**: \`${sessionInfo.tag}\``] : []),
       ...(sessionInfo?.gitBranch ? [`- **Branch**: \`${sessionInfo.gitBranch}\``] : []),
-      ...(sessionInfo?.summary ? [`- **Summary**: ${sessionInfo.summary}`] : []),
-      ...(!sessionInfo?.summary && sessionInfo?.firstPrompt ? [`- **First prompt**: ${sessionInfo.firstPrompt}`] : []),
+      ...(sessionInfo?.summary ? [`- **Summary**: ${escapeMarkdownInline(sessionInfo.summary)}`] : []),
+      ...(!sessionInfo?.summary && sessionInfo?.firstPrompt ? [`- **First prompt**: ${escapeMarkdownInline(sessionInfo.firstPrompt)}`] : []),
       ...(flagsStr ? [`- **Flags**: ${flagsStr}`] : []),
       ...(lastMessage ? [`- **Last message**:`, "", this.renderFencedBlock("text", lastMessage)] : [])
     ].join("\n");
@@ -1808,4 +1844,8 @@ function formatIsoTimestamp(date: Date): string {
   const offsetHours = String(Math.floor(abs / 60)).padStart(2, "0");
   const offsetSecs = String(abs % 60).padStart(2, "0");
   return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetSecs}`;
+}
+
+function escapeMarkdownInline(value: string): string {
+  return value.replace(/([\\`*_{}\[\]()#+.!])/g, "\\$1");
 }

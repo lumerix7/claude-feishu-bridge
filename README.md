@@ -66,6 +66,7 @@ bash install.sh
 | `/new [-C \<dir\>] [-h]` | Create and bind a fresh Claude session |
 | `/session [\<id\>\|list [options]] [-h]` | Inspect current session, inspect a specific session, or browse sessions |
 | `/resume [\<id\>\|--last\|-n \<index\>\|--list] [-C \<dir\>] [-h]` | Bind a previous session |
+| `/rename [--session \<id\>] ['name'\|-- name] [-h]` | Show or change a Claude session title |
 | `/stop` | Stop the current active run |
 
 ### Claude
