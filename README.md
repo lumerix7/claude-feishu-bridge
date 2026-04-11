@@ -6,8 +6,12 @@ Large fenced output can still render a bit differently across Feishu desktop and
 
 ## Quick start
 
+For the full local install plus Feishu app/robot setup, see [`docs/bridge-install-setup-guide.md`](./docs/bridge-install-setup-guide.md).
+
+Install or update the bridge from this checkout:
+
 ```bash
-bash install.sh
+./install.sh
 ```
 
 Then fill in credentials at `~/.config/claude-feishu-bridge/bridge.env` and start the service.
