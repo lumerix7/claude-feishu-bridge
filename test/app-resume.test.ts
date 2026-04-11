@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { App } from "../src/core/app.js";
 import type { AppConfig } from "../src/config/env.js";
@@ -41,7 +41,7 @@ function makeConfig(storePath: string): AppConfig {
       streamUpdateIntervalMs: 0,
       inlineBlocks: "on"
     },
-    commands: { map: {} },
+    commands: { map: {}, alias: {}, direct: [] },
     project: {
       allowedRoots: ["/workspace"],
       defaultProject: "/workspace",
@@ -291,6 +291,141 @@ test("resume replays recent messages even when rebinding the same session", asyn
       text: "[Claude] 2026-04-09T20:27:10.194+08:00\n\nstill replay",
       bodyFormat: "raw-text"
     });
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("local command alias can prepend args and direct commands run unchanged", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "claude-feishu-bridge-local-"));
+  try {
+    const projectDir = path.join(tmp, "project");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(path.join(projectDir, ".hidden"), "hidden\n");
+
+    const app = new App({
+      ...makeConfig(path.join(tmp, "bindings.json")),
+      project: {
+        allowedRoots: [tmp],
+        defaultProject: projectDir,
+        knownPaths: [],
+        listMaxCount: 100
+      },
+      commands: {
+        map: {},
+        alias: {
+          ll: "ls -A"
+        },
+        direct: ["node"]
+      }
+    });
+
+    const updates: string[] = [];
+    const lsResult = await app.handleIncoming(
+      {
+        messageId: "m-local-ls",
+        chatId: "c1",
+        chatType: "p2p",
+        text: "/ll"
+      },
+      undefined,
+      async (update) => {
+        if (typeof update === "string") updates.push(update);
+      }
+    );
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0], "Running `ll`...\n\n```text\nll\n```");
+    assert.equal(typeof lsResult, "object");
+    assert.equal(lsResult?.bodyFormat, "raw-text");
+    assert.match(lsResult?.text || "", /\.hidden/);
+
+    const nodeResult = await app.handleIncoming({
+      messageId: "m-local-node",
+      chatId: "c1",
+      chatType: "p2p",
+      text: `/node -e "process.stdout.write('direct')"`
+    });
+
+    assert.equal(typeof nodeResult, "object");
+    assert.equal(nodeResult?.bodyFormat, "raw-text");
+    assert.equal(nodeResult?.text, "direct");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("malformed local command alias is ignored with a warning", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "claude-feishu-bridge-local-"));
+  try {
+    const app = new App({
+      ...makeConfig(path.join(tmp, "bindings.json")),
+      commands: {
+        map: {},
+        alias: {
+          broken: "\"unterminated"
+        },
+        direct: []
+      }
+    });
+    const warnings: unknown[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+
+    try {
+      const result = (app as any).resolveLocalProjectCommand("broken");
+
+      assert.equal(result, undefined);
+      assert.equal(warnings.length, 1);
+      assert.deepEqual(warnings[0], [
+        "invalid local command alias ignored",
+        {
+          commandName: "broken",
+          alias: "\"unterminated",
+          parseError: "unterminated double quote"
+        }
+      ]);
+    } finally {
+      console.warn = originalWarn;
+    }
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("signal-killed local commands are errors", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "claude-feishu-bridge-local-"));
+  try {
+    const projectDir = path.join(tmp, "project");
+    await mkdir(projectDir, { recursive: true });
+    const app = new App({
+      ...makeConfig(path.join(tmp, "bindings.json")),
+      project: {
+        allowedRoots: [tmp],
+        defaultProject: projectDir,
+        knownPaths: [],
+        listMaxCount: 100
+      },
+      commands: {
+        map: {},
+        alias: {},
+        direct: ["node"]
+      }
+    });
+
+    const result = await app.handleIncoming({
+      messageId: "m-local-node-signal",
+      chatId: "c1",
+      chatType: "p2p",
+      text: `/node -e "process.kill(process.pid, 'SIGTERM')"`
+    });
+
+    assert.equal(typeof result, "object");
+    assert.equal(result?.severity, "error");
+    assert.equal(result?.bodyFormat, "raw-text");
+    assert.match(result?.text || "", /^Code: SIGTERM\n\n/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

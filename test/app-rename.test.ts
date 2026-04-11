@@ -41,7 +41,7 @@ function makeConfig(storePath: string): AppConfig {
       streamUpdateIntervalMs: 0,
       inlineBlocks: "on"
     },
-    commands: { map: {} },
+    commands: { map: {}, alias: {}, direct: [] },
     project: {
       allowedRoots: ["/workspace"],
       defaultProject: "/workspace",

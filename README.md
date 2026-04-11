@@ -82,10 +82,7 @@ bash install.sh
 |---------|-------------|
 | `/project [list\|bind [\<path\>] \| unbind] [-h]` | Show or manage the bound project |
 | `/git [args...]` | Run `git` in the bound project |
-| `/pwd` | Show bound project directory |
-| `/ls` `/cat` `/head` `/tail` | File inspection |
-| `/find` `/rg` `/tree` | Search and tree |
-| `/cp` `/mv` `/mkdir` `/touch` `/ln` `/rmdir` `/tar` `/trash` | File management |
+| `/cat`, `/cp`, `/curl`, `/feishu`, `/find`, `/git-commit`, `/head`, `/ln`, `/ls`, `/mkdir`, `/mv`, `/pwd`, `/readlink`, `/rg`, `/rmdir`, `/sha256sum`, `/systemctl`, `/tail`, `/tar`, `/tavily-search`, `/todo`, `/touch`, `/trash`, `/trash-list`, `/trash-restore`, `/tree`, `/wc` | Run local project commands |
 
 ### Diagnostics
 

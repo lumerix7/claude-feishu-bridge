@@ -29,6 +29,8 @@ export type CommandName =
   | "tar"
   | "touch"
   | "trash"
+  | "trash-list"
+  | "trash-restore"
   | "tree"
   | "wc"
   | "feishu"
@@ -44,7 +46,7 @@ export interface ParsedCommandError {
   parseError: string;
 }
 
-function tokenizeCommandText(text: string): { tokens: string[]; parseError?: string } {
+export function tokenizeCommandText(text: string): { tokens: string[]; parseError?: string } {
   const tokens: string[] = [];
   let current = "";
   let quote: "'" | '"' | undefined;
@@ -134,6 +136,8 @@ export const BUILTIN_COMMAND_NAMES: readonly string[] = [
   "tar",
   "touch",
   "trash",
+  "trash-list",
+  "trash-restore",
   "tree",
   "wc",
   "feishu",

@@ -7,7 +7,7 @@ import { createClaudeBackend } from "../adapters/claude/claude-runtime.js";
 import { FeishuGateway } from "../adapters/feishu/feishu-gateway.js";
 import { AppConfig } from "../config/env.js";
 import { conversationKeyFor } from "./conversation-key.js";
-import { parseCommand } from "./command-router.js";
+import { parseCommand, tokenizeCommandText } from "./command-router.js";
 import { BindingStore } from "../store/binding-store.js";
 import { ActiveRun, IncomingMessage, OutgoingBodyFormat, OutgoingMessage, SessionBinding } from "../types/domain.js";
 
@@ -35,13 +35,18 @@ const SHELL_COMMAND_NAMES = new Set([
   "ls", "cat", "head", "tail", "wc",
   "find", "rg", "tree",
   "cp", "mv", "mkdir", "touch", "ln", "rmdir", "readlink",
-  "sha256sum", "tar", "trash"
+  "sha256sum", "tar", "trash", "trash-list", "trash-restore"
 ]);
 
 type AppResponse = {
   text: string;
   bodyFormat?: OutgoingBodyFormat;
   severity?: "warning" | "error";
+};
+
+type LocalProjectCommand = {
+  command: string;
+  args: string[];
 };
 
 class ArgCursor {
@@ -74,6 +79,7 @@ export class App {
   private feishu?: FeishuGateway;
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly modelOverrides = new Map<string, { model?: string; effort?: string }>();
+  private readonly warnedLocalCommandAliases = new Set<string>();
   private claudeSettingsCache: { model?: string; effortLevel?: string } | null | undefined = undefined;
 
   constructor(private readonly config: AppConfig) {
@@ -92,7 +98,7 @@ export class App {
     this.feishu = new FeishuGateway(this.config.feishu);
     await this.feishu.start(
       async (message) => {
-        const parsedCommand = parseCommand(message);
+        const parsedCommand = parseCommand(message, this.configuredLocalCommandNames());
         const command = parsedCommand && "args" in parsedCommand ? parsedCommand : undefined;
         const currentBinding = await this.store.get(conversationKeyFor(message));
         const msgKey = conversationKeyFor(message);
@@ -246,7 +252,7 @@ export class App {
       return "Only direct messages are supported right now.";
     }
 
-    const parsedCommand = parseCommand(message);
+    const parsedCommand = parseCommand(message, this.configuredLocalCommandNames());
     if (parsedCommand && "parseError" in parsedCommand) {
       return { text: `Parse error: ${parsedCommand.parseError}`, severity: "warning" };
     }
@@ -272,30 +278,20 @@ export class App {
     }
     if (command?.name === "rename") return this.handleRename(message, new ArgCursor(command.args));
 
-    // File system commands
-    if (command?.name === "git") return this.handleShellCommand(message, "git", command.args, onStatus);
-    if (command?.name === "pwd") return this.handlePwd(message);
-    if (command?.name === "ls") return this.handleShellCommand(message, "ls", command.args, onStatus);
-    if (command?.name === "cat") return this.handleShellCommand(message, "cat", command.args, onStatus);
-    if (command?.name === "head") return this.handleShellCommand(message, "head", command.args, onStatus);
-    if (command?.name === "tail") return this.handleShellCommand(message, "tail", command.args, onStatus);
-    if (command?.name === "find") return this.handleShellCommand(message, "find", command.args, onStatus);
-    if (command?.name === "rg") return this.handleShellCommand(message, "rg", command.args, onStatus);
-    if (command?.name === "tree") return this.handleShellCommand(message, "tree", command.args, onStatus);
-    if (command?.name === "wc") return this.handleShellCommand(message, "wc", command.args, onStatus);
-    if (command?.name === "cp") return this.handleShellCommand(message, "cp", command.args, onStatus);
-    if (command?.name === "mv") return this.handleShellCommand(message, "mv", command.args, onStatus);
-    if (command?.name === "mkdir") return this.handleShellCommand(message, "mkdir", command.args, onStatus);
-    if (command?.name === "touch") return this.handleShellCommand(message, "touch", command.args, onStatus);
-    if (command?.name === "ln") return this.handleShellCommand(message, "ln", command.args, onStatus);
-    if (command?.name === "rmdir") return this.handleShellCommand(message, "rmdir", command.args, onStatus);
-    if (command?.name === "readlink") return this.handleShellCommand(message, "readlink", command.args, onStatus);
-    if (command?.name === "sha256sum") return this.handleShellCommand(message, "sha256sum", command.args, onStatus);
-    if (command?.name === "tar") return this.handleShellCommand(message, "tar", command.args, onStatus);
-    if (command?.name === "trash") return this.handleShellCommand(message, "trash", command.args, onStatus);
-
     if (command?.name === "feishu") return this.handleFeishu(new ArgCursor(command.args));
     if (command?.name === "log") return this.handleLog(new ArgCursor(command.args));
+
+    const resolvedLocalCommand = command ? this.resolveLocalProjectCommand(command.name) : undefined;
+    if (command && resolvedLocalCommand) {
+      return this.handleShellCommand(
+        message,
+        command.name,
+        resolvedLocalCommand.command,
+        resolvedLocalCommand.args,
+        command.args,
+        onStatus
+      );
+    }
 
     // Not a command — send to Claude
     return this.handleClaudeTurn(message, onUpdate, onStatus);
@@ -348,10 +344,7 @@ export class App {
       "",
       "- `/project [list|bind [<path>|-n <index>|-m <path>]|unbind] [-h|--help]` show or manage the bound project",
       "- `/git [args...]` run `git` directly in the current bound project",
-      "- `/pwd` show the current bound project directory",
-      "- `/ls [args...]` `/cat <file>` `/head` `/tail` file inspection tools",
-      "- `/find [args...]` `/rg [args...]` `/tree [args...]` search and tree tools",
-      "- `/cp` `/mv` `/mkdir` `/touch` `/ln` `/rmdir` `/tar` `/trash` file management",
+      `- ${this.localProjectCommandHelpText()} run local project commands`,
       "",
       "## Diagnostics",
       "",
@@ -1368,9 +1361,74 @@ export class App {
     return `\`${await this.effectiveProject(binding)}\``;
   }
 
+  private configuredLocalCommandNames(): string[] {
+    return Array.from(new Set([
+      ...Object.keys(this.commandAliases()),
+      ...this.config.commands.direct
+    ]));
+  }
+
+  private localProjectCommandNames(): string[] {
+    return Array.from(new Set([
+      ...SHELL_COMMAND_NAMES,
+      ...this.configuredLocalCommandNames()
+    ]))
+      .filter((name) => name !== "git")
+      .sort((a, b) => a.localeCompare(b));
+  }
+
+  private localProjectCommandHelpText(): string {
+    return this.localProjectCommandNames().map((name) => `\`/${name}\``).join(", ");
+  }
+
+  private warnInvalidLocalCommandAlias(commandName: string, alias: string, parseError: string): void {
+    const key = `${commandName}\0${alias}\0${parseError}`;
+    if (this.warnedLocalCommandAliases.has(key)) return;
+    this.warnedLocalCommandAliases.add(key);
+    console.warn("invalid local command alias ignored", {
+      commandName,
+      alias,
+      parseError
+    });
+  }
+
+  private commandAliases(): Record<string, string> {
+    return {
+      ...this.config.commands.map,
+      ...this.config.commands.alias
+    };
+  }
+
+  private resolveLocalProjectCommand(commandName: string): LocalProjectCommand | undefined {
+    const alias = this.commandAliases()[commandName];
+    if (alias) {
+      const parsed = tokenizeCommandText(alias);
+      if (!parsed.parseError && parsed.tokens.length > 0) {
+        const [aliasCommand, ...aliasArgs] = parsed.tokens;
+        return {
+          command: aliasCommand,
+          args: aliasArgs
+        };
+      }
+      this.warnInvalidLocalCommandAlias(commandName, alias, parsed.parseError || "empty alias");
+    }
+    if (
+      SHELL_COMMAND_NAMES.has(commandName) ||
+      this.config.commands.direct.includes(commandName)
+    ) {
+      return {
+        command: commandName,
+        args: []
+      };
+    }
+    return undefined;
+  }
+
   private async handleShellCommand(
     message: IncomingMessage,
+    displayName: string,
     command: string,
+    commandArgs: string[],
     args: string[],
     onStatus?: (text: string | AppResponse) => Promise<void>
   ): Promise<string | AppResponse> {
@@ -1379,9 +1437,10 @@ export class App {
     if (!this.isAllowedProject(project)) {
       return { text: `Project path not allowed: ${project}`, severity: "warning" };
     }
-    await onStatus?.(this.renderLocalCommandPreamble(command, args, message.text));
+    const execArgs = [...commandArgs, ...args.map((arg) => arg.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1"))];
+    await onStatus?.(this.renderLocalCommandPreamble(displayName, execArgs, message.text));
     try {
-      const { stdout, stderr } = await execFileAsync(command, args, {
+      const { stdout, stderr } = await execFileAsync(command, execArgs, {
         cwd: project,
         timeout: GIT_COMMAND_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024
@@ -1392,14 +1451,14 @@ export class App {
         bodyFormat: "raw-text"
       };
     } catch (err) {
-      const error = err as Error & { code?: number | string; stdout?: string; stderr?: string };
+      const error = err as Error & { code?: number | string; stdout?: string; stderr?: string; signal?: NodeJS.Signals };
       const output = this.combineCommandOutput(error.stdout, error.stderr);
       const formatted = this.renderWrappedCommandOutput(
-        output || error.message || `${command} command failed`,
-        error.code
+        output || error.message || `${displayName} command failed`,
+        error.code ?? error.signal
       );
       return {
-        severity: error.code === undefined || error.code === 0 || error.code === "0" ? undefined : "error",
+        severity: (error.code == null && !error.signal) || error.code === 0 || error.code === "0" ? undefined : "error",
         text: formatted,
         bodyFormat: "raw-text"
       };
@@ -1676,7 +1735,7 @@ export class App {
       return `${prefix}${preview.slice(0, maxLen - prefix.length)}`;
     }
     // Shell passthrough commands: show "cmd args..." truncated to maxLen
-    if (SHELL_COMMAND_NAMES.has(commandName)) {
+    if (this.resolveLocalProjectCommand(commandName)) {
       const full = text.replace(/\s+/g, " ").trim();
       return full.length > maxLen ? full.slice(0, maxLen - 3) + "..." : full;
     }
