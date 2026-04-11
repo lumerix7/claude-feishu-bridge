@@ -10,6 +10,7 @@
     "wsConnectWarnAfterMs": 30000,
     "reconnectReadyDebounceMs": 60000,
     "titleMaxLength": 120,
+    "footerSessionTitleMaxLength": 50,
     "sendRetry": {
       "maxAttempts": 5,
       "baseDelayMs": 1000,

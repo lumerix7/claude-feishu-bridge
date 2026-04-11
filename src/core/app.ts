@@ -49,6 +49,10 @@ type LocalProjectCommand = {
   args: string[];
 };
 
+type SessionFooterState = {
+  sessionTitle?: string;
+};
+
 class ArgCursor {
   private readonly args: string[];
   constructor(args: string[]) { this.args = [...args]; }
@@ -79,6 +83,7 @@ export class App {
   private feishu?: FeishuGateway;
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly modelOverrides = new Map<string, { model?: string; effort?: string }>();
+  private readonly latestSessionTitleState = new Map<string, SessionFooterState>();
   private readonly warnedLocalCommandAliases = new Set<string>();
   private claudeSettingsCache: { model?: string; effortLevel?: string } | null | undefined = undefined;
 
@@ -916,6 +921,7 @@ export class App {
     if (!nextName) {
       const info = await this.claude.getSessionInfo(sessionId).catch(() => undefined);
       const title = info?.customTitle || info?.summary || "(none)";
+      this.rememberSessionTitle(sessionId, info?.customTitle || info?.summary);
       return [
         `- **Session**: \`${sessionId}\``,
         `- **Title**: ${escapeMarkdownInline(title)}`
@@ -924,6 +930,7 @@ export class App {
 
     try {
       await this.claude.renameSession(sessionId, nextName);
+      this.rememberSessionTitle(sessionId, nextName);
       return [
         `- **Session**: \`${sessionId}\``,
         `- **Title**: ${escapeMarkdownInline(nextName)}`
@@ -1025,6 +1032,7 @@ export class App {
         this.claude.getSessionInfo(sub).catch(() => undefined),
         this.claude.getLastUserMessage(sub).catch(() => undefined)
       ]);
+      this.rememberSessionTitle(sub, sessionInfo?.customTitle || sessionInfo?.summary);
       if (!sessionInfo) {
         return this.withBodyFormat(
           this.renderCommandError("Session", `session not found: \`${sub}\``),
@@ -1059,6 +1067,7 @@ export class App {
       this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined),
       this.claude.getLastUserMessage(binding.claudeSessionId).catch(() => undefined)
     ]);
+    this.rememberSessionTitle(binding.claudeSessionId, sessionInfo?.customTitle || sessionInfo?.summary);
     const text = this.renderSessionDetailText({
       sessionId: binding.claudeSessionId,
       project: binding.project,
@@ -1256,15 +1265,27 @@ export class App {
     }
 
     if (wantsLast) {
-      if (!existing?.lastClaudeSessionId) {
-        return this.renderCommandError(
-          "Resume",
-          "no last session is saved for this conversation",
-          "`/resume <session-id>` or `/resume list`",
-          ["- **Note**: Resume one session explicitly first; successful session switches save the previous session for `/resume -`."]
-        );
+      if (existing?.lastClaudeSessionId) {
+        sessionId = existing.lastClaudeSessionId;
+      } else {
+        const currentProject = await this.effectiveProject(existing);
+        const projectDir = allProjects ? undefined : currentProject;
+        const sessions = await this.claude.listSessions(projectDir, 20);
+        sessions.sort((a, b) => {
+          const aTime = a.lastModified ? new Date(a.lastModified).getTime() : 0;
+          const bTime = b.lastModified ? new Date(b.lastModified).getTime() : 0;
+          return bTime - aTime;
+        });
+        sessionId = sessions[0]?.sessionId;
+        if (!sessionId) {
+          return this.renderCommandError(
+            "Resume",
+            "no last session is saved for this conversation",
+            "`/resume <session-id>` or `/resume list`",
+            ["- **Note**: Resume one session explicitly first; successful session switches save the previous session for `/resume -`."]
+          );
+        }
       }
-      sessionId = existing.lastClaudeSessionId;
     } else if (indexArg !== undefined) {
       const currentProject = await this.effectiveProject(existing);
       const projectDir = projectArg || (allProjects ? undefined : currentProject);
@@ -1623,13 +1644,12 @@ export class App {
     const hours = String(date.getHours()).padStart(2, "0");
     const minutes = String(date.getMinutes()).padStart(2, "0");
     const seconds = String(date.getSeconds()).padStart(2, "0");
-    const millis = String(date.getMilliseconds()).padStart(3, "0");
     const offsetMinutes = -date.getTimezoneOffset();
     const sign = offsetMinutes >= 0 ? "+" : "-";
     const absoluteOffsetMinutes = Math.abs(offsetMinutes);
     const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, "0");
     const offsetRemainderMinutes = String(absoluteOffsetMinutes % 60).padStart(2, "0");
-    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetRemainderMinutes}`;
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetRemainderMinutes}`;
   }
 
   private truncateOutput(value: string): string {
@@ -1818,10 +1838,30 @@ export class App {
     const { model, effort } = await this.resolveModelOptions(key);
     const project = await this.effectiveProject(binding);
     const sessionId = binding?.claudeSessionId;
+    const sessionState = sessionId ? this.latestSessionTitleState.get(sessionId) : undefined;
 
     const modelPart = [model, effort].filter(Boolean).join(" ");
-    const parts = ([modelPart || undefined, `\`${project}\``, sessionId] as (string | undefined)[]).filter(Boolean) as string[];
+    const sessionTitle = sessionState?.sessionTitle
+      ? escapeMarkdownInline(this.truncateMiddle(sessionState.sessionTitle, this.config.feishu.footerSessionTitleMaxLength))
+      : undefined;
+    const parts = ([modelPart || undefined, `\`${project}\``, sessionId, sessionTitle] as (string | undefined)[]).filter(Boolean) as string[];
     return parts.length ? `${ts}  |  ${parts.join(" · ")}` : ts;
+  }
+
+  private rememberSessionTitle(sessionId: string, title: string | undefined): void {
+    if (!title) return;
+    const existing = this.latestSessionTitleState.get(sessionId) || {};
+    this.latestSessionTitleState.set(sessionId, { ...existing, sessionTitle: title });
+  }
+
+  private truncateMiddle(value: string, maxLength: number): string {
+    if (value.length <= maxLength) return value;
+    if (maxLength <= 3) return value.slice(0, maxLength);
+    const tailLength = Math.floor((maxLength - 3) / 2);
+    const headLength = maxLength - 3 - tailLength;
+    return tailLength > 0
+      ? `${value.slice(0, headLength)}...${value.slice(-tailLength)}`
+      : `${value.slice(0, headLength)}...`;
   }
 
   private withBodyFormat(
@@ -1886,6 +1926,10 @@ export class App {
       this.claude.getVersion(),
       startupKey ? this.store.get(startupKey) : Promise.resolve(undefined)
     ]);
+    if (binding?.claudeSessionId) {
+      const info = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
+      this.rememberSessionTitle(binding.claudeSessionId, info?.customTitle || info?.summary);
+    }
     const project = await this.effectiveProject(binding);
     const footer = await this.buildFooter(startupKey || "", binding);
     const permissionMode = binding?.permissionMode || this.config.claude.permissionMode;
@@ -1909,13 +1953,12 @@ function formatIsoTimestamp(date: Date): string {
   const hours = String(date.getHours()).padStart(2, "0");
   const minutes = String(date.getMinutes()).padStart(2, "0");
   const seconds = String(date.getSeconds()).padStart(2, "0");
-  const millis = String(date.getMilliseconds()).padStart(3, "0");
   const offsetMinutes = -date.getTimezoneOffset();
   const sign = offsetMinutes >= 0 ? "+" : "-";
   const abs = Math.abs(offsetMinutes);
   const offsetHours = String(Math.floor(abs / 60)).padStart(2, "0");
-  const offsetSecs = String(abs % 60).padStart(2, "0");
-  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetSecs}`;
+  const offsetMins = String(abs % 60).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetMins}`;
 }
 
 function escapeMarkdownInline(value: string): string {

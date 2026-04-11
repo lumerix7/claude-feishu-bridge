@@ -188,12 +188,12 @@ test("resume last alias replays recent messages with timestamps", async () => {
       {
         role: "assistant",
         text: "first line\n```inside```",
-        timestamp: "2026-04-09T20:27:10.194+08:00"
+        timestamp: "2026-04-09T20:27:10+08:00"
       },
       {
         role: "user",
         text: "follow up",
-        timestamp: "2026-04-09T20:27:32.000+08:00"
+        timestamp: "2026-04-09T20:27:32+08:00"
       }
     ];
     (app as any).claude = makeBackend({
@@ -232,11 +232,11 @@ test("resume last alias replays recent messages with timestamps", async () => {
     assert.match(text, /- \*\*Session\*\*: `session-1`/);
     assert.equal(updates.length, 2);
     assert.deepEqual(updates[0], {
-      text: "[Claude] 2026-04-09T20:27:10.194+08:00\n\nfirst line\n```inside```",
+      text: "[Claude] 2026-04-09T20:27:10+08:00\n\nfirst line\n```inside```",
       bodyFormat: "raw-text"
     });
     assert.deepEqual(updates[1], {
-      text: "[User] 2026-04-09T20:27:32.000+08:00\n\nfollow up",
+      text: "[User] 2026-04-09T20:27:32+08:00\n\nfollow up",
       bodyFormat: "raw-text"
     });
   } finally {
@@ -264,7 +264,7 @@ test("resume replays recent messages even when rebinding the same session", asyn
           {
             role: "assistant",
             text: "still replay",
-            timestamp: "2026-04-09T20:27:10.194+08:00"
+            timestamp: "2026-04-09T20:27:10+08:00"
           }
         ];
       }
@@ -288,7 +288,7 @@ test("resume replays recent messages even when rebinding the same session", asyn
 
     assert.equal(updates.length, 1);
     assert.deepEqual(updates[0], {
-      text: "[Claude] 2026-04-09T20:27:10.194+08:00\n\nstill replay",
+      text: "[Claude] 2026-04-09T20:27:10+08:00\n\nstill replay",
       bodyFormat: "raw-text"
     });
   } finally {

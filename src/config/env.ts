@@ -37,6 +37,7 @@ export interface AppConfig {
     sendRetryMultiplier: number;
     sendRetryMaxDelayMs: number;
     titleMaxLength: number;
+    footerSessionTitleMaxLength: number;
   };
   claude: {
     claudeBin: string;
@@ -83,6 +84,7 @@ interface JsonConfigShape {
       maxDelayMs?: unknown;
     };
     titleMaxLength?: unknown;
+    footerSessionTitleMaxLength?: unknown;
   };
   claude?: {
     claudeBin?: unknown;
@@ -153,7 +155,14 @@ export function loadConfig(): AppConfig {
       sendRetryBaseDelayMs: readIntegerSetting("FEISHU_SEND_RETRY_BASE_DELAY_MS", 1000, jsonConfig, ["feishu", "sendRetry", "baseDelayMs"], { min: 0 }),
       sendRetryMultiplier: readNumberSetting("FEISHU_SEND_RETRY_MULTIPLIER", 2, jsonConfig, ["feishu", "sendRetry", "multiplier"], { min: 1 }),
       sendRetryMaxDelayMs: readIntegerSetting("FEISHU_SEND_RETRY_MAX_DELAY_MS", 10000, jsonConfig, ["feishu", "sendRetry", "maxDelayMs"], { min: 0 }),
-      titleMaxLength: readIntegerSetting("FEISHU_TITLE_MAX_LENGTH", 120, jsonConfig, ["feishu", "titleMaxLength"], { min: 8 })
+      titleMaxLength: readIntegerSetting("FEISHU_TITLE_MAX_LENGTH", 120, jsonConfig, ["feishu", "titleMaxLength"], { min: 8 }),
+      footerSessionTitleMaxLength: readIntegerSetting(
+        "FEISHU_FOOTER_SESSION_TITLE_MAX_LENGTH",
+        50,
+        jsonConfig,
+        ["feishu", "footerSessionTitleMaxLength"],
+        { min: 0 }
+      )
     },
     claude: {
       claudeBin: readTextSetting("CLAUDE_BIN", "claude", jsonConfig, ["claude", "claudeBin"]),
