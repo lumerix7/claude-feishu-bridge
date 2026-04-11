@@ -299,12 +299,13 @@ export class App {
 
   // ---- Helpers ----
 
-  private renderCommandError(_title: string, error: string, usage?: string): AppResponse {
+  private renderCommandError(_title: string, error: string, usage?: string, extraLines: string[] = [], severity: AppResponse["severity"] = "warning"): AppResponse {
     return {
-      severity: "warning",
+      severity,
       text: [
         `- **Error**: ${error}`,
-        ...(usage ? [`- **Usage**: ${usage}`] : [])
+        ...(usage ? [`- **Usage**: ${usage}`] : []),
+        ...extraLines
       ].join("\n")
     };
   }
@@ -1312,7 +1313,13 @@ export class App {
     // Validate session exists, then resolve project
     const sessionInfo = await this.claude.getSessionInfo(sessionId).catch(() => undefined);
     if (!sessionInfo) {
-      return this.renderCommandError("Resume", `session not found: \`${sessionId}\``, "`/resume list`");
+      return this.renderCommandError(
+        "Resume",
+        `session not found: \`${sessionId}\``,
+        undefined,
+        ["- **Note**: Use `/resume list` or `/session list` to find resumable sessions."],
+        "error"
+      );
     }
     const sessionCwd = sessionInfo?.cwd;
     let resolvedProject: string;
