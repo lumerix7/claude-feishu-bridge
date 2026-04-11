@@ -22,6 +22,7 @@ import type {
   ClaudeBackend,
   ClaudeRunHandle,
   ClaudeRunHooks,
+  RateLimitSnapshot,
   RecentSessionMessage,
   ClaudeTurnOptions,
   ClaudeTurnResult,
@@ -103,6 +104,7 @@ function buildTimelineText(timeline: TimelineEntry[]): string {
 export class SdkClaudeBackend implements ClaudeBackend {
   readonly mode = "sdk" as const;
   private readonly activeRuns = new Map<string, Query>();
+  private lastRateLimitSnapshot: RateLimitSnapshot | undefined;
 
   constructor(private readonly config: AppConfig) {}
 
@@ -311,6 +313,14 @@ export class SdkClaudeBackend implements ClaudeBackend {
           if (msg.type === "rate_limit_event") {
             const m = msg as { rate_limit_info: { status: string; resetsAt?: number; rateLimitType?: string; utilization?: number } };
             const info = m.rate_limit_info;
+            if (info.utilization !== undefined) {
+              this.lastRateLimitSnapshot = {
+                utilization: info.utilization,
+                rateLimitType: info.rateLimitType,
+                resetsAt: info.resetsAt,
+                capturedAt: Date.now(),
+              };
+            }
             if (info.status !== "allowed") {
               const resetsAt = info.resetsAt ? new Date(info.resetsAt * 1000).toISOString() : undefined;
               const parts = [`\u26a0\ufe0f Rate limit: ${info.status}`];
@@ -607,6 +617,10 @@ export class SdkClaudeBackend implements ClaudeBackend {
 
   async renameSession(sessionId: string, title: string): Promise<void> {
     await sdkRenameSession(sessionId, title);
+  }
+
+  getRateLimitInfo(): RateLimitSnapshot | undefined {
+    return this.lastRateLimitSnapshot;
   }
 
   async getVersion(): Promise<string | undefined> {

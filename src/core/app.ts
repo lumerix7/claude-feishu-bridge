@@ -393,6 +393,19 @@ export class App {
       lines.push(`**Active run**: ${activeRun.runId} (${activeRun.status})`);
     }
     lines.push(`**Conversation**: \`${key}\``);
+
+    const rl = this.claude.getRateLimitInfo();
+    if (rl) {
+      const pct = `${Math.round(rl.utilization * 100)}%`;
+      const type = rl.rateLimitType ? ` (${rl.rateLimitType})` : "";
+      const resets = rl.resetsAt
+        ? ` — resets ${formatIsoTimestamp(new Date(rl.resetsAt * 1000))}`
+        : "";
+      const age = Math.round((Date.now() - rl.capturedAt) / 60000);
+      const ageStr = age < 1 ? "just now" : `${age}m ago`;
+      lines.push(`**Usage${type}**: ${pct} used${resets} *(seen ${ageStr})*`);
+    }
+
     return lines.join("\n");
   }
 

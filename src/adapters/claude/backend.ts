@@ -38,6 +38,15 @@ export interface ClaudeTurnOptions {
   effort?: string;
 }
 
+export interface RateLimitSnapshot {
+  /** Fraction 0–1 (e.g. 0.91 = 91%) */
+  utilization: number;
+  rateLimitType?: string;
+  /** Unix seconds */
+  resetsAt?: number;
+  capturedAt: number;
+}
+
 export interface ClaudeBackend {
   readonly mode: "sdk";
   runTurn(
@@ -54,4 +63,6 @@ export interface ClaudeBackend {
   getRecentSessionMessages(sessionId: string, limit: number): Promise<RecentSessionMessage[]>;
   renameSession(sessionId: string, title: string): Promise<void>;
   getVersion(): Promise<string | undefined>;
+  /** Returns the last rate-limit utilization snapshot seen during any run, or undefined if none yet. */
+  getRateLimitInfo(): RateLimitSnapshot | undefined;
 }
