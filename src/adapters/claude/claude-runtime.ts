@@ -22,6 +22,7 @@ import type {
   ClaudeBackend,
   ClaudeRunHandle,
   ClaudeRunHooks,
+  RecentSessionMessage,
   ClaudeTurnOptions,
   ClaudeTurnResult,
 } from "./backend.js";
@@ -566,19 +567,42 @@ export class SdkClaudeBackend implements ClaudeBackend {
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
         if (m.type !== "user") continue;
-        const msg = m.message as { content?: unknown };
-        if (typeof msg.content === "string") return msg.content;
-        if (Array.isArray(msg.content)) {
-          const text = msg.content
-            .filter((b: unknown) => (b as { type?: string }).type === "text")
-            .map((b: unknown) => (b as { text?: string }).text || "")
-            .join("")
-            .trim();
-          if (text) return text;
-        }
+        const text = extractSessionMessageText(m.message);
+        if (text) return text;
       }
     } catch {}
     return undefined;
+  }
+
+  async getRecentSessionMessages(sessionId: string, limit: number): Promise<RecentSessionMessage[]> {
+    if (limit <= 0) return [];
+    try {
+      const messages = await sdkGetSessionMessages(sessionId);
+      const recent: RecentSessionMessage[] = [];
+      for (const message of messages) {
+        if (message.type !== "user" && message.type !== "assistant") continue;
+        const text = extractSessionMessageText(message.message);
+        if (!text) continue;
+        const normalized: RecentSessionMessage = {
+          role: message.type,
+          text,
+          timestamp: readSessionMessageTimestamp(message)
+        };
+        const previous = recent.at(-1);
+        if (
+          previous &&
+          previous.role === normalized.role &&
+          previous.text === normalized.text &&
+          previous.timestamp === normalized.timestamp
+        ) {
+          continue;
+        }
+        recent.push(normalized);
+      }
+      return recent.slice(-limit);
+    } catch {
+      return [];
+    }
   }
 
   async renameSession(sessionId: string, title: string): Promise<void> {
@@ -599,4 +623,27 @@ export class SdkClaudeBackend implements ClaudeBackend {
 
 export function createClaudeBackend(config: AppConfig): ClaudeBackend {
   return new SdkClaudeBackend(config);
+}
+
+function extractSessionMessageText(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") {
+    const trimmed = content.trim();
+    return trimmed || undefined;
+  }
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((block): block is { type?: string; text?: string } => !!block && typeof block === "object")
+    .filter((block) => block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text || "")
+    .join("")
+    .trim();
+  return text || undefined;
+}
+
+function readSessionMessageTimestamp(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const timestamp = (message as { timestamp?: unknown }).timestamp;
+  return typeof timestamp === "string" && timestamp.trim() ? timestamp : undefined;
 }

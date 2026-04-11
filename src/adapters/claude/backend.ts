@@ -3,6 +3,12 @@ import { IncomingMessage } from "../../types/domain.js";
 
 export type { SDKSessionInfo, SessionMessage };
 
+export interface RecentSessionMessage {
+  role: "user" | "assistant";
+  text: string;
+  timestamp?: string;
+}
+
 export interface ClaudeTurnResult {
   runId: string;
   sessionId?: string;
@@ -45,6 +51,7 @@ export interface ClaudeBackend {
   listSessions(dir?: string, limit?: number): Promise<SDKSessionInfo[]>;
   getSessionInfo(sessionId: string): Promise<SDKSessionInfo | undefined>;
   getLastUserMessage(sessionId: string): Promise<string | undefined>;
+  getRecentSessionMessages(sessionId: string, limit: number): Promise<RecentSessionMessage[]>;
   renameSession(sessionId: string, title: string): Promise<void>;
   getVersion(): Promise<string | undefined>;
 }

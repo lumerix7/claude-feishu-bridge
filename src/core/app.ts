@@ -13,6 +13,7 @@ import { ActiveRun, IncomingMessage, OutgoingBodyFormat, OutgoingMessage, Sessio
 
 const execFileAsync = promisify(execFile);
 const GIT_COMMAND_TIMEOUT_MS = 30_000;
+const DEFAULT_RESUME_REPLAY_COUNT = 5;
 
 const COMMAND_BASE_TITLES: Record<string, string> = {
   help: "Help",
@@ -256,7 +257,7 @@ export class App {
     if (command?.name === "permission") return this.handlePermission(message, new ArgCursor(command.args));
     if (command?.name === "project") return this.handleProject(message, new ArgCursor(command.args));
     if (command?.name === "session") return this.handleSession(message, new ArgCursor(command.args));
-    if (command?.name === "resume") return this.handleResume(message, new ArgCursor(command.args));
+    if (command?.name === "resume") return this.handleResume(message, new ArgCursor(command.args), onStatus || onUpdate);
     if (command?.name === "rename") return this.handleRename(message, new ArgCursor(command.args));
 
     // File system commands
@@ -311,7 +312,7 @@ export class App {
       "- `/status` show current session and bridge state",
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
       "- `/session [list [-n <count>] [--all] [--project <path>]] [--raw-markdown] [-h|--help]` inspect current session or browse recent sessions",
-      "- `/resume [<session-id>|--last|-n <index>|list] [-C <dir>] [-h|--help]` bind a previous session",
+      "- `/resume [<session-id>|-|--last|-n <index>|list] [--messages <count>] [-C <dir>] [-h|--help]` bind a previous session",
       "- `/rename [<name>] [-h|--help]` show or set the current session title",
       "- `/stop` stop the current active run",
       "",
@@ -632,9 +633,9 @@ export class App {
       "",
       "- `/project`",
       "- `/project list`",
-      "- `/project bind /volumes/ws/my-project`",
+      "- `/project bind /path/to/my-project`",
       "- `/project bind -n 2`",
-      "- `/project bind --mkdir /volumes/ws/new-project`",
+      "- `/project bind --mkdir /path/to/new-project`",
       "- `/project unbind`"
     ].join("\n");
   }
@@ -987,65 +988,110 @@ export class App {
 
   private resumeHelpText(): string {
     return [
-      "Resume a Claude session and bind it to this conversation.",
+      "Resume a session.",
       "",
       "## Usage",
       "",
-      "- `/resume <session-id>` — bind one specific session by ID",
-      "- `/resume --last` — bind the most recent session in the current scope",
-      "- `/resume -n <index>` — bind the Nth session from the current `/session list` ordering",
-      "- `/resume -C <dir>` — resume the latest session for a specific project",
-      "- `/resume list [--all] [--project <path>]` — show resumable sessions",
-      "- `/resume -h|--help` — show this help",
+      "### `/resume <session-id>|[options]` - Resume a session.",
       "",
-      "## Options",
+      "- `<session-id>` Resume one specific session id.",
       "",
-      "### Select Session",
+      "#### Options",
       "",
-      "- `<session-id>` bind one specific session ID",
-      "- `--last` bind the most recent session in the current scope",
-      "- `-n <index>` bind the Nth session from the current `/session list` ordering",
+      "- `-, --last` Resume the most recent session in the current scope.",
+      "- `-n <index>` Resume the Nth session from the current `/session list` ordering.",
+      `- ` + "`--messages <count>`" + ` Append the last ` + `\`${DEFAULT_RESUME_REPLAY_COUNT}\`` + ` messages by default after a successful session change.`,
+      "- `-C, --cd <dir>` Resume while keeping the conversation project in that directory.",
       "",
-      "### List Scope",
+      "### `/resume list [options]` - List resumable sessions.",
       "",
-      "- `list` show the current resumable session list",
-      "- `--all` expand browsing beyond the current project for `list`",
-      "- `--project <path>` scope `list` browsing to one project path",
+      "- `/resume list` Show resumable sessions instead of rebinding.",
       "",
-      "### Project",
+      "#### Options",
       "",
-      "- `-C, --cd <dir>` switch the conversation project; if no session is specified, resumes the latest session for this project",
+      "- `--all` Expand list beyond the current project.",
+      "- `--project <path>` Scope list to one project path.",
       "",
       "### General",
       "",
-      "- `-h, --help` show resume help",
+      "- `-h, --help` Show resume help.",
       "",
       "## Examples",
       "",
-      "- `/resume 41252e25-f28c-4351-9fcf-3b22a9b3c326`",
-      "- `/resume --last`",
-      "- `/resume -n 2`",
-      "- `/resume list`",
-      "- `/resume list --all`",
-      "- `/resume -C /path/to/project`"
+      "- `/resume <session-id>` - resume one specific session",
+      "- `/resume -` - resume the most recent session in the current scope"
     ].join("\n");
   }
 
-  private async handleResume(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
+  private async handleResume(
+    message: IncomingMessage,
+    cursor: ArgCursor,
+    onStatus?: (text: string) => Promise<void>
+  ): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
 
     const help = cursor.takeFlag("-h", "--help");
-    const showList = cursor.takeFlag("--list", "list");
-    const allProjects = cursor.takeFlag("--all");
-    const projectArg = cursor.takeOption("--project");
-    const indexArg = cursor.takeOption("-n");
-    const last = cursor.takeFlag("--last");
     const cdArg = cursor.takeOption("-C", "--cd");
+    if (cdArg === "") {
+      return this.renderCommandError(
+        "Resume",
+        "missing value for `-C|--cd <dir>`",
+        "`/resume [<session-id>|-|--last|-n <index>] [--messages <count>] [-C|--cd <dir>]`"
+      );
+    }
+    const replayMessagesArg = cursor.takeOption("--messages");
+    if (replayMessagesArg === "") {
+      return this.renderCommandError(
+        "Resume",
+        "missing value for `--messages <count>`",
+        "`/resume [<session-id>|-|--last|-n <index>] [--messages <count>] [-C|--cd <dir>]`"
+      );
+    }
+    let replayMessages = DEFAULT_RESUME_REPLAY_COUNT;
+    if (replayMessagesArg !== undefined) {
+      const parsed = Number(replayMessagesArg);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        return this.renderCommandError(
+          "Resume",
+          "invalid message replay count",
+          "`/resume [<session-id>|-|--last|-n <index>] [--messages <count>]`"
+        );
+      }
+      replayMessages = parsed;
+    }
 
     if (help) return this.resumeHelpText();
 
-    // --list: show sessions table (same as /session list but scoped)
-    if (showList) {
+    const allProjects = cursor.takeFlag("--all");
+    const projectArg = cursor.takeOption("--project");
+    if (projectArg === "") {
+      return this.renderCommandError("Resume", "missing value for `--project <path>`", "`/resume list [--all] [--project <path>]`");
+    }
+    const wantsList = cursor.peek() === "list";
+    if (projectArg && !wantsList) {
+      return this.renderCommandError(
+        "Resume",
+        "use `--project <path>` with `/resume list`, or use `-C|--cd <dir>` to switch project while resuming",
+        "`/resume list [--project <path>]`"
+      );
+    }
+    if (allProjects && !wantsList) {
+      return this.renderCommandError(
+        "Resume",
+        "use `--all` with `/resume list` to browse across projects, then resume by session id",
+        "`/resume list --all`"
+      );
+    }
+
+    if (wantsList) {
+      cursor.shift();
+      if (replayMessagesArg !== undefined) {
+        return this.renderCommandError(
+          "Resume",
+          "use `--messages <count>` only when actually resuming a session, not with `list`",
+          "`/resume [<session-id>|-|--last|-n <index>] [--messages <count>]`"
+        );
+      }
       if (!cursor.isEmpty()) {
         return this.renderCommandError("Resume", `unsupported argument \`${cursor.peek()}\``, "`/resume list [--all] [--project <path>]`");
       }
@@ -1095,10 +1141,36 @@ export class App {
       return [header, divider, ...rows].join("\n");
     }
 
-    // Resolve target session ID
     let sessionId: string | undefined;
+    let wantsLast = false;
 
-    if (indexArg !== undefined || last) {
+    if (cursor.peek() === "--last") {
+      cursor.shift();
+      wantsLast = true;
+    }
+    if (cursor.peek() === "-") {
+      cursor.shift();
+      wantsLast = true;
+    }
+    if ((cursor.peek() || "").startsWith("-") && cursor.peek() !== "-n") {
+      return this.renderCommandError(
+        "Resume",
+        `unsupported bridge option \`${cursor.peek()}\``,
+        "`/resume [<session-id>|-|--last|-n <index>|list]`"
+      );
+    }
+    const indexArg = cursor.takeOption("-n");
+    if (cursor.isEmpty() && !wantsLast && indexArg === undefined) {
+      return {
+        severity: "warning",
+        text: [
+          "- **Error**: pick a session explicitly, or use `-` to resume the most recent session",
+          "- **Usage**: `/resume [<session-id>|-|--last|-n <index>|list|-h]`"
+        ].join("\n")
+      };
+    }
+
+    if (indexArg !== undefined || wantsLast) {
       const binding = await this.store.get(key);
       const currentProject = await this.effectiveProject(binding);
       const projectDir = projectArg || (allProjects ? undefined : currentProject);
@@ -1118,7 +1190,7 @@ export class App {
         const bTime = b.lastModified ? new Date(b.lastModified).getTime() : 0;
         return bTime - aTime;
       });
-      if (last) {
+      if (wantsLast) {
         sessionId = sessions[0]?.sessionId;
       } else {
         const index = Number(indexArg);
@@ -1149,7 +1221,7 @@ export class App {
     }
 
     if (!sessionId) {
-      return this.renderCommandError("Resume", "no session specified", "`/resume [<session-id>|--last|-n <index>|list] [-C <dir>] [-h|--help]`");
+      return this.renderCommandError("Resume", "no session specified", "`/resume [<session-id>|-|--last|-n <index>|list]`");
     }
 
     const binding = await this.store.get(key);
@@ -1184,7 +1256,7 @@ export class App {
     if (sessionCwd && sessionCwd !== resolvedProject) {
       leadingLines.push(`- **Warning**: session cwd \`${sessionCwd}\` outside allowed roots — kept existing project`);
     }
-    return this.renderSessionDetailText({
+    const detail = this.renderSessionDetailText({
       sessionId,
       project: resolvedProject,
       updatedAt: now,
@@ -1193,6 +1265,13 @@ export class App {
       flags: ["bound"],
       leadingLines
     });
+    if (replayMessages > 0 && onStatus) {
+      const recentMessages = await this.renderRecentSessionReplayMessages(sessionId, replayMessages);
+      for (const recentMessage of recentMessages) {
+        await onStatus(recentMessage);
+      }
+    }
+    return detail;
   }
 
   private async handlePwd(message: IncomingMessage): Promise<string> {
@@ -1351,6 +1430,42 @@ export class App {
       ...(flagsStr ? [`- **Flags**: ${flagsStr}`] : []),
       ...(lastMessage ? [`- **Last message**:`, "", this.renderFencedBlock("text", lastMessage)] : [])
     ].join("\n");
+  }
+
+  private async renderRecentSessionReplayMessages(
+    sessionId: string,
+    limit: number
+  ): Promise<string[]> {
+    const messages = await this.claude.getRecentSessionMessages(sessionId, limit).catch(() => []);
+    return messages.map((message) => this.renderRecentSessionReplayMessage(message));
+  }
+
+  private renderRecentSessionReplayMessage(
+    message: { role: "user" | "assistant"; text: string; timestamp?: string }
+  ): string {
+    const role = message.role === "assistant" ? "[Claude]" : "[User]";
+    const prefix = message.timestamp ? `${role} ${this.formatLocalIsoTimestamp(message.timestamp)}` : role;
+    return this.renderFencedBlock("text", `${prefix}\n\n${message.text}`);
+  }
+
+  private formatLocalIsoTimestamp(value: string | Date): string {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return typeof value === "string" ? value : date.toISOString();
+    }
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    const seconds = String(date.getSeconds()).padStart(2, "0");
+    const millis = String(date.getMilliseconds()).padStart(3, "0");
+    const offsetMinutes = -date.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? "+" : "-";
+    const absoluteOffsetMinutes = Math.abs(offsetMinutes);
+    const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, "0");
+    const offsetRemainderMinutes = String(absoluteOffsetMinutes % 60).padStart(2, "0");
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetRemainderMinutes}`;
   }
 
   private truncateOutput(value: string): string {

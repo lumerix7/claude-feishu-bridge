@@ -18,7 +18,7 @@
     }
   },
   "claude": {
-    "claudeBin": "/opt/node/bin/claude",
+    "claudeBin": "claude",
     "permissionMode": "bypassPermissions",
     "maxBudgetUsd": 10,
     "outputSoftLimit": 100000,
