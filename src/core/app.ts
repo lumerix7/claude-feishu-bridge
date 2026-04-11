@@ -290,12 +290,10 @@ export class App {
 
   // ---- Helpers ----
 
-  private renderCommandError(title: string, error: string, usage?: string): AppResponse {
+  private renderCommandError(_title: string, error: string, usage?: string): AppResponse {
     return {
       severity: "warning",
       text: [
-        `# ${title}`,
-        "",
         `- **Error**: ${error}`,
         ...(usage ? [`- **Usage**: ${usage}`] : [])
       ].join("\n")
@@ -313,7 +311,7 @@ export class App {
       "- `/status` show current session and bridge state",
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
       "- `/session [list [-n <count>] [--all] [--project <path>]] [--raw-markdown] [-h|--help]` inspect current session or browse recent sessions",
-      "- `/resume [<session-id>|--last|-n <index>|--list] [-C <dir>] [-h|--help]` bind a previous session",
+      "- `/resume [<session-id>|--last|-n <index>|list] [-C <dir>] [-h|--help]` bind a previous session",
       "- `/rename [<name>] [-h|--help]` show or set the current session title",
       "- `/stop` stop the current active run",
       "",
@@ -947,23 +945,23 @@ export class App {
       );
 
       const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
-      const header = "| # | Project | Updated | Session | Last message | Summary | Flags |";
-      const divider = "| --- | --- | --- | --- | --- | --- | --- |";
+      const header = "| # | Project | Updated | Session | Last message | Name | Summary | Flags |";
+      const divider = "| --- | --- | --- | --- | --- | --- | --- | --- |";
       const rows = sessions.map((s, i) => {
-        const project = s.cwd ? `\`${s.cwd}\`` : "-";
+        const isCurrent = s.sessionId === currentSessionId;
+        const project = s.cwd || "-";
         const updated = s.lastModified
           ? new Date(s.lastModified).toISOString().slice(0, 19).replace("T", " ")
           : "-";
-        const sessionId = `\`${s.sessionId}\``;
         const lastMsg = lastMessages[i] ? escapeCell(lastMessages[i]!) : "-";
+        const name = s.customTitle ? escapeCell(s.customTitle) : "-";
         const summary = escapeCell(s.summary || s.firstPrompt || "(no preview)");
         const flags = [
-          s.sessionId === currentSessionId ? "**current**" : "",
-          boundIds.has(s.sessionId) && s.sessionId !== currentSessionId ? "bound" : "",
-          s.tag ? `\`${s.tag}\`` : "",
-          s.customTitle ? `_${s.customTitle}_` : ""
+          isCurrent ? "`current`" : "",
+          boundIds.has(s.sessionId) && !isCurrent ? "bound" : "",
+          s.tag ? `\`${s.tag}\`` : ""
         ].filter(Boolean).join(" ");
-        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${flags || "-"} |`;
+        return `| ${i + 1} | ${project} | ${updated} | ${s.sessionId} | ${lastMsg} | ${name} | ${summary} | ${flags || "-"} |`;
       });
 
       return this.withBodyFormat([header, divider, ...rows].join("\n"), bodyFormat);
@@ -972,24 +970,18 @@ export class App {
     if (!binding?.claudeSessionId) {
       return this.withBodyFormat("No active session. Send a message or use `/new` to start.", bodyFormat);
     }
-    const sessionInfo = await this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined);
-    const formatSize = (bytes?: number) => {
-      if (bytes == null) return undefined;
-      if (bytes < 1024) return `${bytes} B`;
-      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    };
-    const text = [
-      `**Session**: \`${binding.claudeSessionId}\``,
-      `**Project**: \`${binding.project}\``,
-      ...(sessionInfo?.createdAt ? [`**Created**: ${new Date(sessionInfo.createdAt).toISOString().slice(0, 19).replace("T", " ")}`] : []),
-      `**Updated**: ${binding.updatedAt}`,
-      ...(sessionInfo?.fileSize != null ? [`**File size**: ${formatSize(sessionInfo.fileSize)}`] : []),
-      ...(sessionInfo?.customTitle ? [`**Title**: ${sessionInfo.customTitle}`] : []),
-      ...(sessionInfo?.tag ? [`**Tag**: \`${sessionInfo.tag}\``] : []),
-      ...(sessionInfo?.gitBranch ? [`**Branch**: \`${sessionInfo.gitBranch}\``] : []),
-      ...(sessionInfo?.summary ? [`**Summary**: ${sessionInfo.summary}`] : [])
-    ].join("\n");
+    const [sessionInfo, lastMessage] = await Promise.all([
+      this.claude.getSessionInfo(binding.claudeSessionId).catch(() => undefined),
+      this.claude.getLastUserMessage(binding.claudeSessionId).catch(() => undefined)
+    ]);
+    const text = this.renderSessionDetailText({
+      sessionId: binding.claudeSessionId,
+      project: binding.project,
+      updatedAt: binding.updatedAt,
+      sessionInfo,
+      lastMessage: lastMessage || undefined,
+      flags: ["`current`", "bound"]
+    });
     return this.withBodyFormat(text, bodyFormat);
   }
 
@@ -1002,7 +994,8 @@ export class App {
       "- `/resume <session-id>` — bind one specific session by ID",
       "- `/resume --last` — bind the most recent session in the current scope",
       "- `/resume -n <index>` — bind the Nth session from the current `/session list` ordering",
-      "- `/resume --list [--all] [--project <path>]` — show resumable sessions",
+      "- `/resume -C <dir>` — resume the latest session for a specific project",
+      "- `/resume list [--all] [--project <path>]` — show resumable sessions",
       "- `/resume -h|--help` — show this help",
       "",
       "## Options",
@@ -1015,13 +1008,13 @@ export class App {
       "",
       "### List Scope",
       "",
-      "- `--list` show the current resumable session list",
-      "- `--all` expand browsing beyond the current project for `--list`",
-      "- `--project <path>` scope `--list` browsing to one project path",
+      "- `list` show the current resumable session list",
+      "- `--all` expand browsing beyond the current project for `list`",
+      "- `--project <path>` scope `list` browsing to one project path",
       "",
       "### Project",
       "",
-      "- `-C, --cd <dir>` switch the conversation project when binding the session",
+      "- `-C, --cd <dir>` switch the conversation project; if no session is specified, resumes the latest session for this project",
       "",
       "### General",
       "",
@@ -1032,27 +1025,29 @@ export class App {
       "- `/resume 41252e25-f28c-4351-9fcf-3b22a9b3c326`",
       "- `/resume --last`",
       "- `/resume -n 2`",
-      "- `/resume --list`",
-      "- `/resume --list --all`"
+      "- `/resume list`",
+      "- `/resume list --all`",
+      "- `/resume -C /path/to/project`"
     ].join("\n");
   }
 
   private async handleResume(message: IncomingMessage, cursor: ArgCursor): Promise<string | AppResponse> {
     const key = conversationKeyFor(message);
 
-    if (cursor.peek() === "-h" || cursor.peek() === "--help") return this.resumeHelpText();
-
-    const showList = cursor.takeFlag("--list");
+    const help = cursor.takeFlag("-h", "--help");
+    const showList = cursor.takeFlag("--list", "list");
     const allProjects = cursor.takeFlag("--all");
     const projectArg = cursor.takeOption("--project");
     const indexArg = cursor.takeOption("-n");
     const last = cursor.takeFlag("--last");
     const cdArg = cursor.takeOption("-C", "--cd");
 
+    if (help) return this.resumeHelpText();
+
     // --list: show sessions table (same as /session list but scoped)
     if (showList) {
       if (!cursor.isEmpty()) {
-        return this.renderCommandError("Resume", `unsupported argument \`${cursor.peek()}\``, "`/resume --list [--all] [--project <path>]`");
+        return this.renderCommandError("Resume", `unsupported argument \`${cursor.peek()}\``, "`/resume list [--all] [--project <path>]`");
       }
       const binding = await this.store.get(key);
       const currentProject = await this.effectiveProject(binding);
@@ -1080,22 +1075,22 @@ export class App {
         sessions.map((s) => this.claude.getLastUserMessage(s.sessionId).catch(() => undefined))
       );
       const escapeCell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
-      const header = "| # | Project | Updated | Session | Last message | Summary | Branch | Flags |";
-      const divider = "| --- | --- | --- | --- | --- | --- | --- | --- |";
+      const header = "| # | Project | Updated | Session | Last message | Name | Summary | Branch | Flags |";
+      const divider = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |";
       const rows = sessions.map((s, i) => {
-        const project = s.cwd ? `\`${s.cwd}\`` : "-";
+        const isCurrent = s.sessionId === currentSessionId;
+        const project = s.cwd || "-";
         const updated = s.lastModified ? new Date(s.lastModified).toISOString().slice(0, 19).replace("T", " ") : "-";
-        const sessionId = `\`${s.sessionId}\``;
         const lastMsg = lastMessages[i] ? escapeCell(lastMessages[i]!) : "-";
+        const name = s.customTitle ? escapeCell(s.customTitle) : "-";
         const summary = escapeCell(s.summary || s.firstPrompt || "(no preview)");
         const branch = s.gitBranch ? `\`${s.gitBranch}\`` : "-";
         const flags = [
-          s.sessionId === currentSessionId ? "`current`" : "",
-          boundIds.has(s.sessionId) && s.sessionId !== currentSessionId ? "bound" : "",
-          s.tag ? `\`${s.tag}\`` : "",
-          s.customTitle ? `_${s.customTitle}_` : ""
+          isCurrent ? "`current`" : "",
+          boundIds.has(s.sessionId) && !isCurrent ? "bound" : "",
+          s.tag ? `\`${s.tag}\`` : ""
         ].filter(Boolean).join(" ");
-        return `| ${i + 1} | ${project} | ${updated} | ${sessionId} | ${lastMsg} | ${summary} | ${branch} | ${flags || "-"} |`;
+        return `| ${i + 1} | ${project} | ${updated} | ${s.sessionId} | ${lastMsg} | ${name} | ${summary} | ${branch} | ${flags || "-"} |`;
       });
       return [header, divider, ...rows].join("\n");
     }
@@ -1109,7 +1104,7 @@ export class App {
       const projectDir = projectArg || (allProjects ? undefined : currentProject);
       const sessions = await this.claude.listSessions(projectDir, 20);
       if (sessions.length === 0) {
-        return this.renderCommandError("Resume", "no sessions found in current scope", "`/resume --list [--all]`");
+        return this.renderCommandError("Resume", "no sessions found in current scope", "`/resume list [--all]`");
       }
       const currentSessionIdForSort = binding?.claudeSessionId;
       sessions.sort((a, b) => {
@@ -1132,7 +1127,7 @@ export class App {
         }
         const selected = sessions[index - 1];
         if (!selected) {
-          return this.renderCommandError("Resume", `index ${index} out of range (1–${sessions.length})`, "`/resume --list`");
+          return this.renderCommandError("Resume", `index ${index} out of range (1–${sessions.length})`, "`/resume list`");
         }
         sessionId = selected.sessionId;
       }
@@ -1140,15 +1135,31 @@ export class App {
       sessionId = cursor.remainingText() || undefined;
     }
 
+    // If no session specified but -C was given, resolve to the latest session for that project
+    if (!sessionId && cdArg) {
+      const resolvedCdProject = this.resolveProject(cdArg);
+      if (!this.isAllowedProject(resolvedCdProject)) {
+        return this.renderCommandError("Resume", `path not in allowed roots: \`${resolvedCdProject}\``, "`/resume -C <dir>`");
+      }
+      const sessions = await this.claude.listSessions(resolvedCdProject, 1);
+      if (sessions.length === 0) {
+        return this.renderCommandError("Resume", `no sessions found for project \`${resolvedCdProject}\``, "`/resume list --all`");
+      }
+      sessionId = sessions[0].sessionId;
+    }
+
     if (!sessionId) {
-      return this.renderCommandError("Resume", "no session specified", "`/resume [<session-id>|--last|-n <index>|--list] [-h|--help]`");
+      return this.renderCommandError("Resume", "no session specified", "`/resume [<session-id>|--last|-n <index>|list] [-C <dir>] [-h|--help]`");
     }
 
     const binding = await this.store.get(key);
     const now = new Date().toISOString();
 
-    // Resolve project: -C/--cd arg > session cwd > current effective project
+    // Validate session exists, then resolve project
     const sessionInfo = await this.claude.getSessionInfo(sessionId).catch(() => undefined);
+    if (!sessionInfo) {
+      return this.renderCommandError("Resume", `session not found: \`${sessionId}\``, "`/resume list`");
+    }
     const sessionCwd = sessionInfo?.cwd;
     let resolvedProject: string;
     if (cdArg) {
@@ -1168,11 +1179,20 @@ export class App {
       await this.store.put({ conversationKey: key, claudeSessionId: sessionId, project: resolvedProject, createdAt: now, updatedAt: now });
     }
 
-    const lines = [`Resumed session: \`${sessionId}\``, `**Project**: \`${resolvedProject}\``];
+    const lastMessage = await this.claude.getLastUserMessage(sessionId).catch(() => undefined);
+    const leadingLines: string[] = [];
     if (sessionCwd && sessionCwd !== resolvedProject) {
-      lines.push(`_(session cwd \`${sessionCwd}\` outside allowed roots — kept existing project)_`);
+      leadingLines.push(`- **Warning**: session cwd \`${sessionCwd}\` outside allowed roots — kept existing project`);
     }
-    return lines.join("\n");
+    return this.renderSessionDetailText({
+      sessionId,
+      project: resolvedProject,
+      updatedAt: now,
+      sessionInfo,
+      lastMessage: lastMessage || undefined,
+      flags: ["bound"],
+      leadingLines
+    });
   }
 
   private async handlePwd(message: IncomingMessage): Promise<string> {
@@ -1295,6 +1315,42 @@ export class App {
     );
     const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
     return `${fence}${language}\n${value}\n${fence}`;
+  }
+
+  private renderSessionDetailText(options: {
+    sessionId: string;
+    project: string;
+    updatedAt?: string;
+    sessionInfo?: { createdAt?: number; fileSize?: number; cwd?: string; customTitle?: string; tag?: string; gitBranch?: string; summary?: string; firstPrompt?: string } | undefined;
+    lastMessage?: string;
+    flags?: string[];
+    leadingLines?: string[];
+  }): string {
+    const { sessionId, project, updatedAt, sessionInfo, lastMessage, flags = [], leadingLines = [] } = options;
+    const formatSize = (bytes?: number) => {
+      if (bytes == null) return undefined;
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
+    const flagsStr = flags.filter(Boolean).join(", ");
+    return [
+      ...leadingLines,
+      ...(leadingLines.length > 0 ? [""] : []),
+      `- **Session**: \`${sessionId}\``,
+      `- **Project**: \`${project}\``,
+      ...(sessionInfo?.createdAt ? [`- **Created**: ${new Date(sessionInfo.createdAt).toISOString().slice(0, 19).replace("T", " ")}`] : []),
+      ...(updatedAt ? [`- **Updated**: ${updatedAt}`] : []),
+      ...(sessionInfo?.cwd ? [`- **Cwd**: \`${sessionInfo.cwd}\``] : []),
+      ...(sessionInfo?.fileSize != null ? [`- **File size**: ${formatSize(sessionInfo.fileSize)}`] : []),
+      ...(sessionInfo?.customTitle ? [`- **Name**: ${sessionInfo.customTitle}`] : []),
+      ...(sessionInfo?.tag ? [`- **Tag**: \`${sessionInfo.tag}\``] : []),
+      ...(sessionInfo?.gitBranch ? [`- **Branch**: \`${sessionInfo.gitBranch}\``] : []),
+      ...(sessionInfo?.summary ? [`- **Summary**: ${sessionInfo.summary}`] : []),
+      ...(!sessionInfo?.summary && sessionInfo?.firstPrompt ? [`- **First prompt**: ${sessionInfo.firstPrompt}`] : []),
+      ...(flagsStr ? [`- **Flags**: ${flagsStr}`] : []),
+      ...(lastMessage ? [`- **Last message**:`, "", this.renderFencedBlock("text", lastMessage)] : [])
+    ].join("\n");
   }
 
   private truncateOutput(value: string): string {
