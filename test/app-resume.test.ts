@@ -108,6 +108,60 @@ test("resume help works regardless of -h position", async () => {
   }
 });
 
+test("session help works regardless of -h position", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "claude-feishu-bridge-"));
+  try {
+    const app = new App(makeConfig(path.join(tmp, "bindings.json")));
+
+    const direct = await app.handleIncoming(makeMessage("/session -h"));
+    const trailing = await app.handleIncoming(makeMessage("/session session-123 -h"));
+
+    const directText = typeof direct === "string" ? direct : direct.text;
+    const trailingText = typeof trailing === "string" ? trailing : trailing.text;
+    assert.equal(trailingText, directText);
+    assert.match(directText, /^# Session\n\nInspect the current bound session, inspect one specific Claude Code session, or browse recent sessions\./);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("session with an explicit session id renders that session without bound flags", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "claude-feishu-bridge-"));
+  try {
+    const app = new App(makeConfig(path.join(tmp, "bindings.json")));
+    await (app as any).store.put({
+      conversationKey: "c1",
+      claudeSessionId: "session-1",
+      project: "/workspace",
+      createdAt: "2026-04-09T12:27:00.000Z",
+      updatedAt: "2026-04-09T12:27:00.000Z"
+    });
+    (app as any).claude = makeBackend({
+      async getSessionInfo(sessionId: string) {
+        if (sessionId !== "session-2") return undefined;
+        return {
+          sessionId,
+          cwd: "/workspace/project-b",
+          createdAt: Date.parse("2026-04-09T12:27:00.000Z"),
+          summary: "summary preview"
+        } as any;
+      },
+      async getLastUserMessage(sessionId: string) {
+        return sessionId === "session-2" ? "latest prompt" : undefined;
+      }
+    });
+
+    const result = await app.handleIncoming(makeMessage("/session session-2"));
+
+    const text = typeof result === "string" ? result : result.text;
+    assert.match(text, /- \*\*Session\*\*: `session-2`\n- \*\*Project\*\*: `\/workspace\/project-b`/);
+    assert.doesNotMatch(text, /- \*\*Flags\*\*: .*bound/);
+    assert.match(text, /- \*\*Last message\*\*:\n\n```text\nlatest prompt\n```$/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("resume without a selector warns and points to explicit latest aliases", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "claude-feishu-bridge-"));
   try {

@@ -64,7 +64,7 @@ bash install.sh
 | `/help` | Show commands |
 | `/status` | Current session and bridge state |
 | `/new [-C \<dir\>] [-h]` | Create and bind a fresh Claude session |
-| `/session [list [-n \<count\>] [--all] [--project \<path\>]] [-h]` | Inspect or browse sessions |
+| `/session [\<id\>\|list [options]] [-h]` | Inspect current session, inspect a specific session, or browse sessions |
 | `/resume [\<id\>\|--last\|-n \<index\>\|--list] [-C \<dir\>] [-h]` | Bind a previous session |
 | `/stop` | Stop the current active run |
 

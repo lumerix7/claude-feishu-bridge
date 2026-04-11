@@ -323,7 +323,7 @@ export class App {
       "- `/help [--raw-markdown]` show commands",
       "- `/status` show current session and bridge state",
       "- `/new [-C|--cd <dir>] [-h|--help]` create and bind a fresh Claude session",
-      "- `/session [list [-n <count>] [--all] [--project <path>]] [--raw-markdown] [-h|--help]` inspect current session or browse recent sessions",
+      "- `/session [<session-id>|list [options]] [-h|--help]` inspect current session, inspect a specific session, or browse recent sessions",
       "- `/resume [<session-id>|-|--last|-n <index>|list] [--messages <count>] [-C <dir>] [-h|--help]` bind a previous session",
       "- `/rename [<name>] [-h|--help]` show or set the current session title",
       "- `/stop` stop the current active run",
@@ -794,37 +794,37 @@ export class App {
 
   private sessionHelpText(): string {
     return [
-      "Inspect the current bound session or browse recent Claude Code sessions.",
+      "# Session",
+      "",
+      "Inspect the current bound session, inspect one specific Claude Code session, or browse recent sessions.",
       "",
       "## Usage",
       "",
-      "- `/session` — show the current bound session",
-      "- `/session list [-n <count>] [--all] [--project <path>]` — list recent sessions",
-      "- `/session -h|--help` — show this help",
+      "### `/session [<session-id>]` - Show session details.",
       "",
-      "## List options",
+      "- `/session` Show the current bound session for this conversation.",
+      "- `<session-id>` Show one specific session id without rebinding.",
       "",
-      "- `-n <count>` limit the number of sessions shown (default: 20)",
-      "- `--all` include sessions from all projects (default: current project only)",
-      "- `--project <path>` filter to a specific project path",
+      "### `/session list [options]` - List recent sessions.",
       "",
-      "## Columns",
+      "- `/session list` Browse recent sessions instead of rendering one session detail view.",
       "",
-      "- **Project** — working directory of the session",
-      "- **Updated** — last modified time",
-      "- **Session** — full session UUID (copy to use with `/resume`)",
-      "- **Last message** — last user message sent in the session",
-      "- **Summary** — Claude-generated session summary or first prompt",
-      "- **Branch** — git branch at end of session",
-      "- **Flags** — `current` (bound to this chat), `bound` (bound elsewhere), tag, custom title",
+      "#### Options",
+      "",
+      "- `-n <count>` Limit the number of sessions shown (default: `20`).",
+      "- `--all` Expand browsing beyond the current project.",
+      "- `--project <path>` Scope the list to one specific project path.",
+      "",
+      "### General",
+      "",
+      "- `--raw-markdown` Return fenced source markdown instead of rendered markdown.",
+      "- `-h, --help` Show session help.",
       "",
       "## Examples",
       "",
-      "- `/session`",
-      "- `/session list`",
-      "- `/session list -n 5`",
-      "- `/session list --all`",
-      "- `/resume <session-id>`"
+      "- `/session` - show the current bound session for this conversation",
+      "- `/session <session-id>` - inspect one specific session without rebinding",
+      "- `/session list` - browse recent sessions for the current project"
     ].join("\n");
   }
 
@@ -907,14 +907,12 @@ export class App {
     const key = conversationKeyFor(message);
     const rawMarkdownOnly = cursor.takeFlag("--raw-markdown");
     const bodyFormat: OutgoingBodyFormat | undefined = rawMarkdownOnly ? "raw-markdown" : undefined;
+    const help = cursor.takeFlag("-h", "--help");
     const sub = cursor.shift();
-    if (sub === "-h" || sub === "--help") {
+    if (help || sub === "-h" || sub === "--help") {
       return this.withBodyFormat(this.sessionHelpText(), bodyFormat);
     }
     if (sub === "list") {
-      if (cursor.peek() === "-h" || cursor.peek() === "--help") {
-        return this.withBodyFormat(this.sessionHelpText(), bodyFormat);
-      }
       const allProjects = cursor.takeFlag("--all");
       const projectArg = cursor.takeOption("--project");
       const countRaw = cursor.takeOption("-n");
@@ -978,6 +976,49 @@ export class App {
       });
 
       return this.withBodyFormat([header, divider, ...rows].join("\n"), bodyFormat);
+    }
+    if (sub && sub.startsWith("-")) {
+      return this.withBodyFormat(
+        this.renderCommandError("Session", `unsupported bridge option \`${sub}\``, "`/session [<session-id>|list [options]|-h]`"),
+        bodyFormat
+      );
+    }
+    if (sub) {
+      if (!cursor.isEmpty()) {
+        return this.withBodyFormat(
+          this.renderCommandError("Session", `unsupported session argument \`${cursor.peek()}\``, "`/session <session-id> [--raw-markdown]`"),
+          bodyFormat
+        );
+      }
+      const [sessionInfo, lastMessage] = await Promise.all([
+        this.claude.getSessionInfo(sub).catch(() => undefined),
+        this.claude.getLastUserMessage(sub).catch(() => undefined)
+      ]);
+      if (!sessionInfo) {
+        return this.withBodyFormat(
+          this.renderCommandError("Session", `session not found: \`${sub}\``),
+          bodyFormat
+        );
+      }
+      const binding = await this.store.get(key);
+      const currentProject = await this.effectiveProject(binding);
+      const sessionProject = sessionInfo.cwd;
+      const canUseSessionProject = Boolean(sessionProject && this.isAllowedProject(sessionProject));
+      const resolvedProject = canUseSessionProject ? sessionProject! : currentProject;
+      const leadingLines: string[] = [];
+      if (sessionProject && !canUseSessionProject) {
+        leadingLines.push(`- **Warning**: session cwd \`${sessionProject}\` outside allowed roots — kept current project`);
+      }
+      const text = this.renderSessionDetailText({
+        sessionId: sub,
+        project: resolvedProject,
+        updatedAt: undefined,
+        sessionInfo,
+        lastMessage: lastMessage || undefined,
+        flags: binding?.claudeSessionId === sub ? ["`current`", "bound"] : [],
+        leadingLines
+      });
+      return this.withBodyFormat(text, bodyFormat);
     }
     const binding = await this.store.get(key);
     if (!binding?.claudeSessionId) {
