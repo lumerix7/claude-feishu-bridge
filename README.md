@@ -79,6 +79,7 @@ bash install.sh
 |---------|-------------|
 | `/model [\<name\>\|list] [-e\|--effort \<level\>] [-h]` | Show or set model/effort level |
 | `/permission [\<mode\>] [-h]` | Show or set permission mode (`bypassPermissions` `acceptEdits` `auto` `dontAsk` `plan` `default`) |
+| `/compact [instruction] [-h]` | Compact the current session context; optional instruction customizes the summary |
 
 ### Project
 

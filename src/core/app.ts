@@ -25,6 +25,7 @@ const COMMAND_BASE_TITLES: Record<string, string> = {
   model: "Model",
   permission: "Permission",
   project: "Project",
+  compact: "Compact",
   feishu: "Feishu",
   log: "Log"
 };
@@ -283,6 +284,7 @@ export class App {
     }
     if (command?.name === "rename") return this.handleRename(message, new ArgCursor(command.args));
 
+    if (command?.name === "compact") return this.handleCompact(message, new ArgCursor(command.args), onUpdate, onStatus);
     if (command?.name === "feishu") return this.handleFeishu(new ArgCursor(command.args));
     if (command?.name === "log") return this.handleLog(new ArgCursor(command.args));
 
@@ -346,6 +348,7 @@ export class App {
       "- `/model [<name>|list] [-e|--effort <level>] [-h|--help]` show or set the model and effort level",
       "- `/permission [<mode>] [-h|--help]` show or set the permission mode",
       "  - modes: `bypassPermissions` `acceptEdits` `auto` `dontAsk` `plan` `default`",
+      "- `/compact [instruction] [-h|--help]` compact the current Claude session context",
       "",
       "## Project",
       "",
@@ -1823,6 +1826,44 @@ export class App {
     return `${value.slice(0, limit)}\n\n[output truncated]`;
   }
 
+  // ---- Compact ----
+
+  private async handleCompact(
+    message: IncomingMessage,
+    cursor: ArgCursor,
+    onUpdate?: (update: string) => Promise<void>,
+    onStatus?: (text: string | AppResponse) => Promise<void>
+  ): Promise<string | AppResponse> {
+    const help = cursor.takeFlag("-h", "--help");
+    if (help) {
+      return [
+        "Compact the current Claude session context.",
+        "",
+        "**Usage**: `/compact [instruction]`",
+        "",
+        "Sends the native `/compact` command to the active Claude session, summarizing the conversation history to reduce context size. An optional instruction customizes the summary. The session must already be bound."
+      ].join("\n");
+    }
+
+    // Forward all remaining tokens as the optional instruction (may contain dash-prefixed words)
+    const instruction = cursor.remainingText();
+
+    const key = conversationKeyFor(message);
+    const existingRun = this.activeRuns.get(key);
+    if (existingRun) {
+      return { text: "A run is already active. Use `/stop` to cancel it first.", severity: "warning" };
+    }
+
+    const binding = await this.store.get(key);
+    if (!binding?.claudeSessionId) {
+      return { text: "No active Claude session to compact. Start a conversation first.", severity: "warning" };
+    }
+
+    await onStatus?.("Compacting context...");
+    const prompt = instruction ? `/compact ${instruction}` : "/compact";
+    return this.handleClaudeTurn({ ...message, text: prompt }, onUpdate, onStatus);
+  }
+
   // ---- Claude turn execution ----
 
   private async handleClaudeTurn(
@@ -1958,6 +1999,7 @@ export class App {
       case "permission": return "\ud83d\udd10";
       case "project": return "\ud83d\udcc2";
       case "feishu": return "\ud83d\udcac";
+      case "compact": return "\ud83d\uddc2\ufe0f";
       case "log": return "\ud83d\udccb";
       default: return undefined;
     }

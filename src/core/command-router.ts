@@ -33,6 +33,7 @@ export type CommandName =
   | "trash-restore"
   | "tree"
   | "wc"
+  | "compact"
   | "feishu"
   | "log";
 
@@ -140,6 +141,7 @@ export const BUILTIN_COMMAND_NAMES: readonly string[] = [
   "trash-restore",
   "tree",
   "wc",
+  "compact",
   "feishu",
   "log"
 ];
